@@ -1,0 +1,16 @@
+# 构建产物
+out/
+*.apk
+*.idsig
+*.ap_
+
+# 调试签名（build.sh 缺失时会自动生成）
+debug.keystore
+
+# 热补丁基线：build.sh 每次构建自动归档，本地生成即可
+baselines/
+patches/*.zip
+
+# 系统文件
+.DS_Store
+Thumbs.db

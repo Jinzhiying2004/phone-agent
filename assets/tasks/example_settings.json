@@ -1,0 +1,1 @@
+{"name":"示例：打开设置并进入显示页","steps":[{"do":"launch","package":"com.android.settings"},{"do":"wait_text","text":"设置","timeout":10},{"do":"tap_text","text":"显示"},{"do":"wait_text","text":"亮度","timeout":10},{"do":"assert_text","text":"亮度"}]}

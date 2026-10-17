@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>手机智能体 phone-agent — 零 token 本地执行的 Android 自动化智能体</title>
+<meta name="description" content="phone-agent：在手机端本地规划、本地执行的 Android 自动化智能体。无障碍 + root 双通道操作，HTTP 远程控制，热补丁，开源免费。">
+<style>
+:root{--bg:#0f1115;--card:#171b22;--text:#e8eaed;--muted:#9aa0a6;--accent:#7c5cff;--accent2:#00d4a4;--border:#262c36}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;line-height:1.7}
+.wrap{max-width:880px;margin:0 auto;padding:0 20px}
+.hero{padding:88px 0 56px;text-align:center}
+.hero h1{font-size:2.4rem;letter-spacing:.02em}
+.hero h1 span{background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+.hero p{color:var(--muted);margin:18px auto 0;max-width:620px;font-size:1.05rem}
+.badges{margin-top:22px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.badge{font-size:.82rem;color:var(--muted);border:1px solid var(--border);border-radius:999px;padding:4px 14px}
+.cta{margin-top:30px;display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+.btn{display:inline-block;padding:12px 30px;border-radius:12px;text-decoration:none;font-weight:600;font-size:1rem;transition:transform .15s}
+.btn.primary{background:linear-gradient(90deg,var(--accent),#9d7bff);color:#fff}
+.btn.ghost{border:1px solid var(--border);color:var(--text)}
+.btn:hover{transform:translateY(-2px)}
+section{padding:44px 0;border-top:1px solid var(--border)}
+h2{font-size:1.5rem;margin-bottom:20px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:20px}
+.card h3{font-size:1.02rem;margin-bottom:8px}
+.card p{color:var(--muted);font-size:.92rem}
+.steps{counter-reset:s}
+.step{display:flex;gap:14px;margin-bottom:16px;align-items:flex-start}
+.step::before{counter-increment:s;content:counter(s);flex:0 0 30px;height:30px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700}
+.step p{color:var(--muted);font-size:.95rem}.step p b{color:var(--text)}
+code{background:#0a0c10;border:1px solid var(--border);border-radius:6px;padding:2px 8px;font-size:.88rem;color:var(--accent2)}
+footer{padding:36px 0 60px;text-align:center;color:var(--muted);font-size:.85rem;border-top:1px solid var(--border)}
+footer a{color:var(--muted)}
+a{color:#9d7bff}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hero">
+    <h1>📱 手机智能体 <span>phone-agent</span></h1>
+    <p>零 token 本地执行的 Android 自动化智能体：任务在手机端本地规划、本地执行，不依赖云端大模型做每一步决策。开源免费，MIT 协议。</p>
+    <div class="badges"><span class="badge">Android 8.0+</span><span class="badge">无障碍 + root 双通道</span><span class="badge">HTTP 远程控制</span><span class="badge">热补丁</span></div>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/Jinzhiying2004/phone-agent/releases">⬇ 下载最新版 APK</a>
+      <a class="btn ghost" href="https://github.com/Jinzhiying2004/phone-agent">GitHub 仓库</a>
+    </div>
+  </div>
+
+  <section>
+    <h2>✨ 功能亮点</h2>
+    <div class="grid">
+      <div class="card"><h3>🧠 任务执行器</h3><p>自然语言目标 → 本地拆解 → 逐步执行 → 监管者复核闭环</p></div>
+      <div class="card"><h3>👁 视觉定位</h3><p>截屏后问视觉模型拿坐标，图标按钮也能点，不靠猜</p></div>
+      <div class="card"><h3>🌐 HTTP 远控</h3><p><code>/status</code> <code>/screen</code> <code>/action</code> <code>/task</code>，经 Tailscale 从云端直连操控</p></div>
+      <div class="card"><h3>🔥 热补丁</h3><p>dex 补丁通道，小修复不用重装，云端一键推送</p></div>
+      <div class="card"><h3>⏰ 定时任务</h3><p>技能卡按需注入，悬浮窗实时反馈，运行记录可导出</p></div>
+      <div class="card"><h3>📦 内置 Termux</h3><p>免 root 模式可用，targetSdk 28 绕开 Android 10+ 执行限制</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>🚀 三步用起来</h2>
+    <div class="step"><p><b>下载安装</b>：从 <a href="https://github.com/Jinzhiying2004/phone-agent/releases">Releases</a> 下载最新 <code>phone-agent-x.xx.apk</code> 安装</p></div>
+    <div class="step"><p><b>打开无障碍服务</b>：系统设置 → 无障碍 → 开启「手机智能体」（root 设备可获得更稳的点击通道）</p></div>
+    <div class="step"><p><b>下达任务</b>：在 App 里用自然语言描述目标，看它一步步执行；远控玩家可配 Tailscale 走 HTTP API</p></div>
+  </section>
+
+  <section>
+    <h2>💬 反馈与建议</h2>
+    <p style="color:var(--muted);margin-bottom:18px">你的每一条反馈都会被 triage，并可能进入夜间自动迭代。提 Issue 时选对应模板：</p>
+    <div class="cta" style="justify-content:flex-start;margin-top:0">
+      <a class="btn primary" href="https://github.com/Jinzhiying2004/phone-agent/issues/new?template=feature_request.md">💡 功能建议</a>
+      <a class="btn ghost" href="https://github.com/Jinzhiying2004/phone-agent/issues/new?template=bug_report.md">🐞 Bug 反馈</a>
+    </div>
+  </section>
+
+  <section>
+    <h2>🔧 自己构建</h2>
+    <p style="color:var(--muted)">手工编译链（aapt2 + javac + d8 + apksigner），无需 Gradle。依赖 JDK 17 与 Android SDK（build-tools 34.0.0 / android-34）：</p>
+    <p style="margin-top:12px"><code>./build.sh</code></p>
+    <p style="color:var(--muted);margin-top:12px;font-size:.9rem">版本号规则：每次迭代 +0.01（单次超 5 功能则 +0.1），versionCode +1，产物命名 <code>phone-agent-&lt;版本&gt;.apk</code>。</p>
+  </section>
+
+  <footer>phone-agent · MIT License · <a href="https://github.com/Jinzhiying2004/phone-agent">GitHub</a></footer>
+</div>
+</body>
+</html>

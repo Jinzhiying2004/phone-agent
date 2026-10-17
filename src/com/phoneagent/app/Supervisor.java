@@ -1,0 +1,148 @@
+package com.phoneagent.app;
+
+import org.json.JSONObject;
+
+/**
+ * 监管者：独立于执行 agent 的第二视角。
+ * 设计原则（不武断）：
+ * - 保守判定：只有明确证据表明未完成才否决，不确定时倾向确认
+ * - 分级评估：给出完成度百分比，而非简单的 是/否
+ * - 针对性指导：明确指出缺什么、下一步具体做什么，而非"继续"二字
+ * - 卡住识别：连续两轮卡在同一问题时停手，不烧 token
+ */
+public class Supervisor {
+
+    public static class Verdict {
+        /** 任务是否真正完成（保守判定） */
+        public boolean completed;
+        /** 完成度 0-100 */
+        public int progressPct;
+        /** 进度与情况描述 */
+        public String progress = "";
+        /** 最终结果点评 */
+        public String review = "";
+        /** 具体缺什么（可操作的具体描述，无则空） */
+        public String missing = "";
+        /** 建议的具体下一步（无则空） */
+        public String nextAction = "";
+        public boolean ok = false;
+    }
+
+    public static Verdict review(LlmClient client, String goal, boolean workerSaid,
+                                 String history, String finalScreen) {
+        Verdict v = new Verdict();
+        try {
+            String prompt = "你是手机自动化任务的监管者，负责独立复核任务完成情况。\n\n"
+                    + "用户目标：" + goal + "\n"
+                    + "执行 agent 自认：" + (workerSaid ? "已完成" : "未完成") + "\n"
+                    + "执行过程：\n" + history + "\n"
+                    + "任务结束时的手机界面：\n" + finalScreen + "\n\n"
+                    + "判定原则（重要）：\n"
+                    + "1. 保守判定：只有在有明确证据表明目标未达成时，才判 completed=false；"
+                    + "证据不足或目标已基本达成时，判 completed=true\n"
+                    + "2. 不要吹毛求疵：细节不完美但目标已达成，算完成，在 review 里说明即可\n"
+                    + "3. 不要武断：否决必须给出具体的 missing 和 next_action，"
+                    + "说不清缺什么就不要否决\n\n"
+                    + "只输出纯 JSON：\n"
+                    + "{\"completed\":true,"
+                    + "\"progress_pct\":85,"
+                    + "\"progress\":\"一句话进度描述\","
+                    + "\"review\":\"一句话结果点评\","
+                    + "\"missing\":\"具体缺什么（无则空字符串）\","
+                    + "\"next_action\":\"建议的具体下一步（无则空字符串）\"}";
+            LlmClient.Result r = client.chat(prompt);
+            if (!r.ok) return v;
+            JSONObject o = AgentLoop.extractJson(r.text);
+            if (o == null) return v;
+            v.completed = o.optBoolean("completed", workerSaid);
+            v.progressPct = Math.max(0, Math.min(100, o.optInt("progress_pct",
+                    v.completed ? 100 : 50)));
+            v.progress = o.optString("progress", "");
+            v.review = o.optString("review", "");
+            v.missing = o.optString("missing", "");
+            v.nextAction = o.optString("next_action", "");
+            // 一致性修正：说完成但完成度低，或说未完成但完成度满，都以 completed 为准微调
+            if (v.completed && v.progressPct < 60) v.progressPct = 80;
+            v.ok = true;
+        } catch (Exception ignored) {
+        }
+        return v;
+    }
+
+    /**
+     * 实时监管：任务执行中每隔几步调用，判断是否偏离/卡住。
+     * 返回干预意见（null 或空 = 一切正常，无需干预）。
+     * 轻量 prompt，省 token。
+     */
+    public static String monitor(LlmClient client, String goal,
+                                 String recentHistory, int step) {
+        try {
+            String prompt = "你是手机自动化任务的实时监管者。任务正在执行中，"
+                    + "请判断执行是否正常。\n\n"
+                    + "用户目标：" + goal + "\n"
+                    + "当前第 " + step + " 步，最近几步：\n"
+                    + recentHistory + "\n\n"
+                    + "只输出纯 JSON：\n"
+                    + "{\"status\":\"ok\"或\"warning\"或\"stuck\","
+                    + "\"advice\":\"一句话干预意见（ok 时为空字符串）\"}";
+            LlmClient.Result r = client.chat(prompt);
+            if (!r.ok) return null;
+            JSONObject o = AgentLoop.extractJson(r.text);
+            if (o == null) return null;
+            String status = o.optString("status", "ok");
+            if ("ok".equals(status)) return null;
+            String advice = o.optString("advice", "");
+            if (advice.isEmpty()) return null;
+            return "【监管者实时提醒】（第" + step + "步，"
+                    + ("stuck".equals(status) ? "疑似卡住" : "注意") + "）"
+                    + advice;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 生成给 agent 的结构化反馈（聪明指导，而非"继续"二字） */
+    public static String buildFeedback(Verdict v) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("完成度约 ").append(v.progressPct).append("%。");
+        if (!v.progress.isEmpty()) sb.append(v.progress);
+        if (!v.missing.isEmpty()) {
+            sb.append("\n还缺：").append(v.missing);
+        }
+        if (!v.nextAction.isEmpty()) {
+            sb.append("\n建议下一步：").append(v.nextAction);
+        }
+        sb.append("\n注意：不要重复已完成的步骤，只处理缺失的部分。");
+        return sb.toString();
+    }
+
+    /** 纯逻辑：判断两轮是否卡在同一问题（可独立测试） */
+    public static boolean isStuck(String lastMissing, String curMissing) {
+        if (lastMissing == null || curMissing == null) return false;
+        String a = lastMissing.trim();
+        String b = curMissing.trim();
+        if (a.isEmpty() || b.isEmpty()) return false;
+        // 完全相同，或一方包含另一方核心（取前 10 字比较）
+        if (a.equals(b)) return true;
+        String ka = a.length() > 10 ? a.substring(0, 10) : a;
+        String kb = b.length() > 10 ? b.substring(0, 10) : b;
+        return ka.equals(kb);
+    }
+
+    public static String conclude(boolean workerSaid, Verdict v) {
+        if (!v.ok) return "🔍 监管者复核失败（网络或解析异常），以执行结果为准";
+        StringBuilder sb = new StringBuilder("🔍 监管者判定：");
+        sb.append(v.completed ? "任务已完成" : "任务未完成");
+        sb.append("（完成度约 ").append(v.progressPct).append("%）");
+        if (!v.progress.isEmpty()) sb.append("\n进度：").append(v.progress);
+        if (!v.review.isEmpty()) sb.append("\n点评：").append(v.review);
+        if (!v.completed) {
+            if (!v.missing.isEmpty()) sb.append("\n缺失：").append(v.missing);
+            if (!v.nextAction.isEmpty()) sb.append("\n建议：").append(v.nextAction);
+            if (workerSaid) sb.append("\n⚠️ 执行 agent 自认完成，但监管者要求针对性补足");
+        } else if (!workerSaid) {
+            sb.append("\n✅ 虽然执行中遇到问题，但监管者确认目标实际已达成");
+        }
+        return sb.toString();
+    }
+}

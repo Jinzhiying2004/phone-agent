@@ -1,0 +1,96 @@
+#!/bin/bash
+# 手工编译 APK（aapt2 + javac + d8 + apksigner），无需 Gradle
+set -e
+cd "$(dirname "$0")"
+
+export JAVA_HOME=/home/hatch/build-tools/jdk17
+export PATH=$JAVA_HOME/bin:$PATH
+SDK=/home/hatch/android-sdk
+BT=$SDK/build-tools/34.0.0
+PLAT=$SDK/platforms/android-34/android.jar
+OUT=out
+
+rm -rf $OUT && mkdir -p $OUT/compiled $OUT/gen $OUT/classes $OUT/dex
+
+echo "== 1/6 aapt2 compile =="
+$BT/aapt2 compile --dir res -o $OUT/compiled/
+
+echo "== 2/6 aapt2 link =="
+# targetSdk 刻意定 28（Android 9）：Android 10+ 对 targetSdk>=29 的应用
+# 用 SELinux 禁止执行私有目录里的二进制文件（W^X 限制），官方 Termux
+# 也是靠 targetSdk=28 绕开的。targetSdk 34 会导致 Termux bash 报 Permission denied。
+$BT/aapt2 link -o $OUT/base.apk -I $PLAT \
+  --manifest AndroidManifest.xml -A assets \
+  --java $OUT/gen $OUT/compiled/*.flat \
+  --min-sdk-version 26 --target-sdk-version 28
+
+echo "== 3/6 javac =="
+javac -encoding UTF-8 -source 8 -target 8 -nowarn -classpath $PLAT -d $OUT/classes \
+  $(find src -name "*.java") $(find $OUT/gen -name "*.java")
+
+echo "== 4/6 d8 =="
+$BT/d8 --min-api 26 --lib $PLAT --output $OUT/dex \
+  $(find $OUT/classes -name "*.class")
+
+echo "== 5/6 打包 dex =="
+cp $OUT/base.apk $OUT/app.apk
+python3 -c "
+import zipfile
+z = zipfile.ZipFile('$OUT/app.apk', 'a', zipfile.ZIP_STORED)
+z.write('$OUT/dex/classes.dex', 'classes.dex')
+z.close()
+print('dex 已加入')
+"
+
+echo "== 6/6 对齐 + 签名 =="
+if [ ! -f debug.keystore ]; then
+  keytool -genkeypair -keystore debug.keystore -alias androiddebugkey \
+    -keyalg RSA -keysize 2048 -validity 10950 \
+    -storepass android -keypass android \
+    -dname "CN=Android Debug,O=Android,C=US" 2>/dev/null
+fi
+$BT/zipalign -f 4 $OUT/app.apk $OUT/app-aligned.apk
+VN=$(grep -o 'versionName="[0-9.]*"' AndroidManifest.xml | grep -o '[0-9.]*')
+APK=../phone-agent-$VN.apk
+$BT/apksigner sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android \
+  --out $APK $OUT/app-aligned.apk
+
+echo "== 验签 =="
+$BT/apksigner verify --print-certs $APK | head -4
+ls -la $APK
+
+echo "== 生成 version.json（应用内更新用，发布时填写 apkUrl） =="
+python3 -c "
+import json, re
+m = open('AndroidManifest.xml').read()
+vc = re.search(r'versionCode=\"(\d+)\"', m).group(1)
+vn = re.search(r'versionName=\"([\d.]+)\"', m).group(1)
+json.dump({'version': vn, 'versionCode': int(vc), 'apkUrl': '',
+           'notes': ''}, open('../version.json', 'w'), ensure_ascii=False, indent=2)
+print(open('../version.json').read())
+"
+echo "提示：把 version.json 的 apkUrl 填上 APK 直链后，和 APK 一起放到更新源"
+
+echo "== 7/7 归档热补丁基线 =="
+VC=$(grep -o 'versionCode="[0-9]*"' AndroidManifest.xml | grep -o '[0-9]*')
+rm -rf baselines/$VC && mkdir -p baselines/$VC
+cp -r $OUT/classes baselines/$VC/classes
+cp -r $OUT/gen baselines/$VC/gen
+python3 -c "
+import hashlib, json, os
+def sha(p):
+    h = hashlib.sha256()
+    with open(p, 'rb') as f:
+        for c in iter(lambda: f.read(65536), b''): h.update(c)
+    return h.hexdigest()
+snap = {}
+for top in ('res', 'assets'):
+    if os.path.isdir(top):
+        for dp, _, fns in os.walk(top):
+            for fn in sorted(fns):
+                p = os.path.join(dp, fn)
+                snap[os.path.relpath(p)] = sha(p)
+snap['AndroidManifest.xml'] = sha('AndroidManifest.xml')
+json.dump(snap, open('baselines/$VC/snap.json', 'w'), indent=1)
+print('基线已归档：baselines/$VC（含 classes/gen/资源快照）')
+"

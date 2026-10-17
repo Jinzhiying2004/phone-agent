@@ -1,0 +1,322 @@
+package com.phoneagent.app;
+
+import android.content.Context;
+import android.content.SharedPreferences;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+/**
+ * HTTP API 路由 + token 鉴权。
+ * token 首次启动时随机生成，存在 SharedPreferences，App 界面可见。
+ */
+public class ApiHandler implements AgentHttpServer.Handler {
+
+    private final Context ctx;
+    private final String token;
+
+    public ApiHandler(Context ctx) {
+        this.ctx = ctx.getApplicationContext();
+        SharedPreferences sp = ctx.getSharedPreferences("agent", Context.MODE_PRIVATE);
+        String t = sp.getString("token", null);
+        if (t == null) {
+            t = UUID.randomUUID().toString().replace("-", "");
+            sp.edit().putString("token", t).apply();
+        }
+        token = t;
+    }
+
+    public String getToken() {
+        return token;
+    }
+
+    // ---------- 远控目标式任务注册表（/task 异步 + /task/status 轮询 + App 内卡片共用） ----------
+    private static final java.util.LinkedHashMap<String, RemoteTask> remoteTasks =
+            new java.util.LinkedHashMap<>();
+
+    public static synchronized void putRemoteTask(RemoteTask rt) {
+        remoteTasks.put(rt.taskId, rt);
+        while (remoteTasks.size() > 5) {
+            String eldest = remoteTasks.keySet().iterator().next();
+            remoteTasks.remove(eldest);
+        }
+    }
+
+    public static synchronized RemoteTask getRemoteTask(String taskId) {
+        return taskId == null ? null : remoteTasks.get(taskId);
+    }
+
+    /** 最近一个远控任务（App 内卡片 / 不带 taskId 的 status 查询用） */
+    public static synchronized RemoteTask getLatestRemoteTask() {
+        RemoteTask latest = null;
+        for (RemoteTask rt : remoteTasks.values()) latest = rt;
+        return latest;
+    }
+
+    // ---------- 远控任务悬浮窗：启动显示进度，结束留 5 秒后隐藏 ----------
+    private static void floatShow(Context appCtx, String text) {
+        try {
+            new android.os.Handler(android.os.Looper.getMainLooper())
+                    .post(() -> FloatWindow.show(appCtx, text));
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static void floatEnd(String text) {
+        try {
+            FloatWindow.pushLine(text);
+            new android.os.Handler(android.os.Looper.getMainLooper())
+                    .postDelayed(FloatWindow::hide, 5000);
+        } catch (Exception ignored) {
+        }
+    }
+
+    @Override
+    public String handle(String method, String path, Map<String, String> query,
+                         Map<String, String> headers, String body,
+                         byte[] rawBody) throws Exception {
+        String tok = query.get("token");
+        if (tok == null) tok = headers.get("x-token");
+        if (!token.equals(tok)) {
+            return new JSONObject().put("ok", false).put("error", "unauthorized").toString();
+        }
+        switch (path) {
+            case "/status":
+                return new JSONObject()
+                        .put("ok", true)
+                        .put("version", 2)
+                        .put("accessibility", AgentAccessibilityService.isRunning())
+                        .put("service", AgentService.isRunning())
+                        .toString();
+            case "/screen": {
+                List<AgentAccessibilityService.NodeInfo> items =
+                        AgentAccessibilityService.dumpScreen();
+                JSONArray arr = new JSONArray();
+                for (int idx = 0; idx < items.size(); idx++) {
+                    AgentAccessibilityService.NodeInfo ni = items.get(idx);
+                    arr.put(new JSONObject()
+                            .put("id", idx)
+                            .put("text", ni.text)
+                            .put("desc", ni.desc)
+                            .put("clickable", ni.clickable)
+                            .put("cx", ni.cx)
+                            .put("cy", ni.cy));
+                }
+                return new JSONObject().put("ok", true).put("nodes", arr).toString();
+            }
+            case "/action": {
+                if (!"POST".equalsIgnoreCase(method)) {
+                    return new JSONObject().put("ok", false).put("error", "POST required").toString();
+                }
+                List<String> logs = new ArrayList<>();
+                TaskRunner r = new TaskRunner(ctx, logs::add);
+                r.setRemote(true);
+                boolean ok = r.execOneStep(body);
+                return new JSONObject().put("ok", ok).put("log", new JSONArray(logs)).toString();
+            }
+            case "/task": {
+                if (!"POST".equalsIgnoreCase(method)) {
+                    return new JSONObject().put("ok", false).put("error", "POST required").toString();
+                }
+                // v2.45 goal 模式：{"goal":"...","maxSteps":30} → 手机端自主规划执行
+                // （远控智能体不再只能跑固定步骤，目标式任务在手机端拆解/试错/自恢复）
+                JSONObject bj = null;
+                try {
+                    bj = new JSONObject(body);
+                } catch (Exception ignored) {
+                }
+                if (bj != null && bj.has("goal") && !bj.has("steps")) {
+                    LlmStore ls = new LlmStore(ctx);
+                    if (!ls.hasKey()) {
+                        return new JSONObject().put("ok", false).put("error",
+                                "手机端未配置大模型，无法执行目标式任务").toString();
+                    }
+                    final String goal = bj.getString("goal");
+                    final int maxSteps = bj.optInt("maxSteps", 30);
+                    // wait=true：同步等结果（老行为，兼容旧脚本）；
+                    // 默认异步：立即返回 taskId，用 GET /task/status 轮询看思考与执行过程
+                    if (bj.optBoolean("wait", false)) {
+                        List<String> logs = new ArrayList<>();
+                        floatShow(ctx.getApplicationContext(), "🎯 远控任务：" + goal);
+                        AgentLoop loop = new AgentLoop(ctx, ls.client(),
+                                new AgentLoop.Listener() {
+                                    @Override
+                                    public void onLog(String m) {
+                                        logs.add(m);
+                                        String line = FloatWindow.briefLine(m);
+                                        if (line != null) FloatWindow.pushLine(line);
+                                    }
+
+                                    @Override
+                                    public boolean isStopped() {
+                                        return false;
+                                    }
+                                });
+                        loop.setRemote(true); // 远端：高风险动作无审批人时默认拦截
+                        boolean ok = loop.run(goal, maxSteps);
+                        floatEnd(ok ? "✅ 远控任务完成" : "⏹ 远控任务结束");
+                        JSONObject resp = new JSONObject().put("ok", ok)
+                                .put("log", new JSONArray(logs));
+                        try {
+                            resp.put("audit", new JSONArray(loop.getAuditJson()));
+                        } catch (Exception ignored) {
+                        }
+                        return resp.toString();
+                    }
+                    final RemoteTask rt = new RemoteTask(goal, maxSteps);
+                    putRemoteTask(rt);
+                    final Context appCtx = ctx.getApplicationContext();
+                    final LlmClient client = ls.client();
+                    floatShow(appCtx, "🎯 远控任务：" + goal);
+                    new Thread(() -> {
+                        AgentLoop loop = new AgentLoop(appCtx, client,
+                                new AgentLoop.Listener() {
+                                    @Override
+                                    public void onLog(String m) {
+                                        rt.log(m);
+                                        String line = FloatWindow.briefLine(m);
+                                        if (line != null) FloatWindow.pushLine(line);
+                                    }
+
+                                    @Override
+                                    public boolean isStopped() {
+                                        return false;
+                                    }
+                                });
+                        loop.setRemote(true); // 远端：高风险动作无审批人时默认拦截
+                        rt.log("🎯 远控任务启动：" + goal);
+                        try {
+                            boolean ok = loop.run(goal, maxSteps);
+                            rt.ok = ok;
+                            try {
+                                rt.audit = new JSONArray(loop.getAuditJson());
+                            } catch (Exception ignored) {
+                            }
+                        } catch (Exception e) {
+                            rt.error = String.valueOf(e.getMessage());
+                        } finally {
+                            rt.done = true;
+                            rt.log(rt.ok ? "✅ 远控任务完成" : "⏹ 远控任务结束");
+                            floatEnd(rt.ok ? "✅ 远控任务完成" : "⏹ 远控任务结束");
+                        }
+                    }, "remote-task-" + rt.taskId).start();
+                    return new JSONObject().put("ok", true).put("started", true)
+                            .put("taskId", rt.taskId).toString();
+                }
+                List<String> logs = new ArrayList<>();
+                TaskRunner r = new TaskRunner(ctx, logs::add);
+                r.setRemote(true);
+                boolean ok = r.run(body);
+                return new JSONObject().put("ok", ok).put("log", new JSONArray(logs)).toString();
+            }
+            case "/task/status": {
+                // 远控目标式任务的实时进度：思考过程 + 执行过程边跑边看
+                // ?taskId=xxx（不带则返回最近一个任务）
+                if (!"GET".equalsIgnoreCase(method)) {
+                    return new JSONObject().put("ok", false).put("error", "GET required").toString();
+                }
+                String tid = query.get("taskId");
+                RemoteTask rt = (tid == null || tid.isEmpty())
+                        ? getLatestRemoteTask() : getRemoteTask(tid);
+                if (rt == null) {
+                    return new JSONObject().put("ok", false)
+                            .put("error", "无远控任务").toString();
+                }
+                return rt.toJson().toString();
+            }
+            case "/patch": {
+                // 热补丁推送：body 为 patch zip 二进制（rawBody，未经字符串转换）
+                if (!"POST".equalsIgnoreCase(method)) {
+                    return new JSONObject().put("ok", false).put("error", "POST required").toString();
+                }
+                PatchManager.PatchResult pr = PatchManager.stagePatch(ctx, rawBody);
+                JSONObject r = new JSONObject().put("ok", pr.ok);
+                if (!pr.ok) {
+                    r.put("error", pr.error);
+                } else {
+                    r.put("tag", pr.tag);
+                    // 先回响应，再延迟重启使补丁生效
+                    final Context appCtx = ctx.getApplicationContext();
+                    new Thread(() -> {
+                        try {
+                            Thread.sleep(1500);
+                        } catch (InterruptedException ignored) {
+                        }
+                        PatchManager.scheduleRestart(appCtx, 600);
+                        System.exit(0);
+                    }).start();
+                }
+                return r.toString();
+            }
+            case "/screenshot": {
+                if (!"GET".equalsIgnoreCase(method)) {
+                    return new JSONObject().put("ok", false).put("error", "GET required").toString();
+                }
+                try {
+                    byte[] png = null;
+                    String via = null;
+                    // 1) 无障碍截屏（Android 11+，无需 root）
+                    android.graphics.Bitmap bmp = AgentAccessibilityService.screenshot();
+                    if (bmp != null) {
+                        java.io.ByteArrayOutputStream baos =
+                                new java.io.ByteArrayOutputStream();
+                        bmp.compress(android.graphics.Bitmap.CompressFormat.PNG,
+                                100, baos);
+                        png = baos.toByteArray();
+                        bmp.recycle();
+                        via = "accessibility";
+                    }
+                    // 2) 兜底：root 下 screencap
+                    if (png == null) {
+                        java.io.File f = new java.io.File(ctx.getCacheDir(), "shot.png");
+                        if (f.exists()) f.delete();
+                        Process p = Root.exec("screencap -p " + f.getAbsolutePath());
+                        p.waitFor();
+                        if (f.exists() && f.length() > 0) {
+                            png = java.nio.file.Files.readAllBytes(f.toPath());
+                            f.delete();
+                            via = "root";
+                        }
+                    }
+                    if (png == null) {
+                        return new JSONObject().put("ok", false)
+                                .put("error", "screenshot failed").toString();
+                    }
+                    // compact=1：降分辨率 + JPEG 压缩（给 LLM/远程看屏省 token 流量）
+                    boolean compact = "1".equals(query.get("compact"));
+                    if (compact) {
+                        try {
+                            android.graphics.Bitmap shotBmp =
+                                    android.graphics.BitmapFactory.decodeByteArray(
+                                            png, 0, png.length);
+                            byte[] jpg = ScreenshotUtil.toJpegSmall(shotBmp, 720, 70);
+                            if (shotBmp != null) shotBmp.recycle();
+                            if (jpg != null) {
+                                String b64 = android.util.Base64.encodeToString(
+                                        jpg, android.util.Base64.NO_WRAP);
+                                return new JSONObject().put("ok", true)
+                                        .put("via", via).put("compact", true)
+                                        .put("jpg", b64).toString();
+                            }
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    String b64 = android.util.Base64.encodeToString(
+                            png, android.util.Base64.NO_WRAP);
+                    return new JSONObject().put("ok", true)
+                            .put("via", via).put("png", b64).toString();
+                } catch (Exception e) {
+                    return new JSONObject().put("ok", false)
+                            .put("error", String.valueOf(e.getMessage())).toString();
+                }
+            }
+            default:
+                return new JSONObject().put("ok", false).put("error", "unknown path").toString();
+        }
+    }
+}
