@@ -35,6 +35,7 @@
 
 构建脚本缺失 `debug.keystore` 时会自动生成调试签名。
 `baselines/`（热补丁差分基线）每次构建自动归档，无需手动维护。
+启动器图标以 base64 内嵌在 `tools/launcher_icons.b64.json`，构建时缺失自动还原。
 
 ## 版本号规则
 

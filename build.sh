@@ -10,6 +10,18 @@ BT=$SDK/build-tools/34.0.0
 PLAT=$SDK/platforms/android-34/android.jar
 OUT=out
 
+# 启动器图标以 base64 内嵌在 tools/launcher_icons.b64.json（文本推送管线无法传输二进制 PNG）；
+# 构建前若 PNG 缺失则自动还原，不影响正常构建。
+python3 - <<'EOF'
+import json, base64, os
+icons = json.load(open('tools/launcher_icons.b64.json'))
+for path, b64 in icons.items():
+    if not os.path.exists(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, 'wb').write(base64.b64decode(b64))
+        print('已还原图标', path)
+EOF
+
 rm -rf $OUT && mkdir -p $OUT/compiled $OUT/gen $OUT/classes $OUT/dex
 
 echo "== 1/6 aapt2 compile =="
