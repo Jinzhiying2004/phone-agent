@@ -689,6 +689,11 @@ public class TaskRunner {
                             JSONObject cs = TaskRunner.substitute(
                                     csteps.getJSONObject(ci), params);
                             if (!runStep(cs, params, depth + 1)) {
+                                // v2.53：可选步骤失败只跳过，不中断整卡
+                                if (cs.optBoolean("optional", false)) {
+                                    log("可选步骤跳过 (" + (ci + 1) + ")");
+                                    continue;
+                                }
                                 log("技能卡步骤失败于 " + (ci + 1));
                                 cardOk = false;
                                 break;
