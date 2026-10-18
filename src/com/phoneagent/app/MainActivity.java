@@ -3860,6 +3860,18 @@ public class MainActivity extends Activity {
         showPage(lastTab);
         refreshAll();
 
+        // v2.50：无 root 不显示终端 tab（Termux 挂载需要 root；后台检测不卡 UI）
+        new Thread(() -> {
+            boolean hasRoot = Root.findSu() != null;
+            if (!hasRoot) {
+                runOnUiThread(() -> {
+                    tabTerm.setVisibility(View.GONE);
+                    int cur = getSharedPreferences("ui", MODE_PRIVATE).getInt("tab", 0);
+                    if (cur == 3) showPage(0);
+                });
+            }
+        }).start();
+
         // 输入法弹起时：终端页可见且输入行被键盘遮挡，自动上滚让输入框露出来
         getWindow().getDecorView().getViewTreeObserver()
                 .addOnGlobalLayoutListener(() -> {
