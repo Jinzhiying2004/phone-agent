@@ -100,6 +100,49 @@ public class TaskRunner {
         }
     }
 
+    // ===== v2.60 虚拟屏 helpers =====
+    /** VdInput dex 路径 */
+    private String vdDexPath(android.content.Context c) {
+        return new java.io.File(c.getFilesDir(), "vdinput.dex").getAbsolutePath();
+    }
+
+    /** 确保 VdInput dex 已从 assets 拷贝 */
+    private boolean ensureVdInput(android.content.Context c) {
+        if (!VirtualDisplayManager.isActive()) {
+            log("虚拟屏未创建，先 vd_create");
+            return false;
+        }
+        java.io.File dex = new java.io.File(c.getFilesDir(), "vdinput.dex");
+        if (!dex.exists()) {
+            try {
+                java.io.InputStream in = c.getAssets().open("vdinput.dex");
+                java.io.FileOutputStream out = new java.io.FileOutputStream(dex);
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                in.close();
+                out.close();
+                log("VdInput dex 已释放");
+            } catch (Exception e) {
+                log("dex 释放失败: " + e.getMessage());
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** 取 App 的启动 Activity 类名 */
+    private String getLaunchActivity(android.content.Context c, String pkg) {
+        try {
+            android.content.Intent it = c.getPackageManager()
+                    .getLaunchIntentForPackage(pkg);
+            if (it != null && it.getComponent() != null) {
+                return it.getComponent().getClassName();
+            }
+        } catch (Exception ignored) {}
+        return "";
+    }
+
     public static String loadAsset(Context ctx, String name) {
         try {
             InputStream is = ctx.getAssets().open("tasks/" + name);
@@ -620,17 +663,104 @@ public class TaskRunner {
                     return false;
                 }
             }
-            case "vd_test": {
-                // v2.54-spike：虚拟屏可行性验证（隐藏测试动作）
-                String result = VirtualDisplayTest.run(ctx);
-                log("虚拟屏测试结果：\n" + result);
-                lastOutput = result;
-                return result.contains("OK");
-            }
-            case "vd_release": {
-                VirtualDisplayTest.release();
-                log("虚拟屏已释放");
+            // (vd_test 已被 v2.60 正式版替代，移除)
+            // ===== v2.60：虚拟屏后台自动化 =====
+            case "vd_create": {
+                int w = st.optInt("w", 720);
+                int h = st.optInt("h", 1280);
+                int dpi = st.optInt("dpi", 320);
+                int did = VirtualDisplayManager.create(ctx, w, h, dpi);
+                if (did < 0) {
+                    log("虚拟屏创建失败");
+                    return false;
+                }
+                log("虚拟屏已创建 displayId=" + did);
+                lastOutput = String.valueOf(did);
                 return true;
+            }
+            case "vd_destroy": {
+                VirtualDisplayManager.destroy();
+                log("虚拟屏已销毁");
+                return true;
+            }
+            case "vd_launch": {
+                // root 启动 App 到虚拟屏
+                if (!VirtualDisplayManager.isActive()) {
+                    log("虚拟屏未创建，先 vd_create");
+                    return false;
+                }
+                String pkg = st.optString("package", "");
+                if (pkg.isEmpty()) {
+                    log("缺少 package 参数");
+                    return false;
+                }
+                int did = VirtualDisplayManager.getDisplayId();
+                String out = rootCmdOut("am start --display " + did
+                        + " -n " + pkg + "/"
+                        + getLaunchActivity(ctx, pkg) + " 2>&1");
+                log("启动到虚拟屏: " + out.trim());
+                return !out.contains("Error");
+            }
+            case "vd_tap": {
+                if (!ensureVdInput(ctx)) return false;
+                int did = VirtualDisplayManager.getDisplayId();
+                float x = (float) st.optDouble("x", 0);
+                float y = (float) st.optDouble("y", 0);
+                String out = rootCmdOut("CLASSPATH=" + vdDexPath(ctx)
+                        + " app_process /system/bin VdInput tap "
+                        + did + " " + x + " " + y + " 2>&1");
+                log("虚拟屏点击: " + out.trim());
+                return out.contains("down=true");
+            }
+            case "vd_swipe": {
+                if (!ensureVdInput(ctx)) return false;
+                int did = VirtualDisplayManager.getDisplayId();
+                float x1 = (float) st.optDouble("x1", 0);
+                float y1 = (float) st.optDouble("y1", 0);
+                float x2 = (float) st.optDouble("x2", 0);
+                float y2 = (float) st.optDouble("y2", 0);
+                int dur = st.optInt("duration", 500);
+                String out = rootCmdOut("CLASSPATH=" + vdDexPath(ctx)
+                        + " app_process /system/bin VdInput swipe "
+                        + did + " " + x1 + " " + y1 + " "
+                        + x2 + " " + y2 + " " + dur + " 2>&1");
+                log("虚拟屏滑动: " + out.trim());
+                return out.contains("ok=true");
+            }
+            case "vd_key": {
+                if (!ensureVdInput(ctx)) return false;
+                int did = VirtualDisplayManager.getDisplayId();
+                int kc = st.optInt("keycode", 4);
+                String out = rootCmdOut("CLASSPATH=" + vdDexPath(ctx)
+                        + " app_process /system/bin VdInput key "
+                        + did + " " + kc + " 2>&1");
+                log("虚拟屏按键: " + out.trim());
+                return out.contains("down=true");
+            }
+            case "vd_screenshot": {
+                String path = st.optString("path", "");
+                android.graphics.Bitmap bmp = VirtualDisplayManager.screenshot();
+                if (bmp == null) {
+                    log("虚拟屏截屏失败");
+                    return false;
+                }
+                try {
+                    java.io.File f = path.isEmpty()
+                            ? new java.io.File(ctx.getCacheDir(),
+                                    "vd_" + System.currentTimeMillis() + ".jpg")
+                            : new java.io.File(path);
+                    java.io.FileOutputStream fos = new java.io.FileOutputStream(f);
+                    bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG,
+                            80, fos);
+                    fos.close();
+                    bmp.recycle();
+                    log("虚拟屏截屏已保存: " + f.getAbsolutePath());
+                    lastOutput = f.getAbsolutePath();
+                    return true;
+                } catch (Exception e) {
+                    log("保存失败: " + e.getMessage());
+                    return false;
+                }
             }
             case "screenshot": {
                 // 任务内截屏存档（无障碍优先，无需 root）

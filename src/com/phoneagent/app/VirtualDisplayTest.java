@@ -93,6 +93,77 @@ public class VirtualDisplayTest {
         return sb.toString();
     }
 
+    /** 保持虚拟屏并返回 displayId（供 root am start 用） */
+    public static String createOnly(Context ctx) {
+        StringBuilder sb = new StringBuilder();
+        try {
+            if (reader == null) {
+                reader = ImageReader.newInstance(720, 1280,
+                        PixelFormat.RGBA_8888, 2);
+            }
+            DisplayManager dm = (DisplayManager) ctx.getSystemService(
+                    Context.DISPLAY_SERVICE);
+            if (vd == null) {
+                vd = dm.createVirtualDisplay("agent_vd",
+                        720, 1280, 160, reader.getSurface(),
+                        DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY);
+            }
+            int did = vd.getDisplay().getDisplayId();
+            sb.append("虚拟屏就绪 displayId=").append(did);
+        } catch (Exception e) {
+            sb.append("FAIL: ").append(e.getMessage());
+        }
+        return sb.toString();
+    }
+
+    /** 从现有 ImageReader 取一帧并存文件，返回路径+亮度分析 */
+    public static String snapSave(Context ctx) {
+        try {
+            if (reader == null) return "reader 为空，先 vd_create";
+            android.media.Image img = reader.acquireLatestImage();
+            if (img == null) return "null（无内容渲染）";
+            android.graphics.Bitmap bmp = imageToBitmap(img);
+            img.close();
+            // 快速分析：采样100个点算平均亮度，全黑=没渲染
+            long sum = 0;
+            int n = 0;
+            for (int y = 0; y < bmp.getHeight(); y += bmp.getHeight() / 10) {
+                for (int x = 0; x < bmp.getWidth(); x += bmp.getWidth() / 10) {
+                    int p = bmp.getPixel(x, y);
+                    sum += (android.graphics.Color.red(p)
+                            + android.graphics.Color.green(p)
+                            + android.graphics.Color.blue(p)) / 3;
+                    n++;
+                }
+            }
+            long avg = n > 0 ? sum / n : 0;
+            java.io.File f = new java.io.File(ctx.getCacheDir(),
+                    "vd_snap_" + System.currentTimeMillis() + ".jpg");
+            java.io.FileOutputStream fos = new java.io.FileOutputStream(f);
+            bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, fos);
+            fos.close();
+            bmp.recycle();
+            return "saved:" + f.getAbsolutePath() + " 平均亮度=" + avg
+                    + (avg < 10 ? "（疑似黑屏/无渲染）" : "（有内容渲染）");
+        } catch (Exception e) {
+            return "FAIL: " + e.getMessage();
+        }
+    }
+
+    private static android.graphics.Bitmap imageToBitmap(android.media.Image img) {
+        android.media.Image.Plane[] planes = img.getPlanes();
+        java.nio.ByteBuffer buf = planes[0].getBuffer();
+        int pixelStride = planes[0].getPixelStride();
+        int rowStride = planes[0].getRowStride();
+        int rowPadding = rowStride - pixelStride * img.getWidth();
+        android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(
+                img.getWidth() + rowPadding / pixelStride,
+                img.getHeight(), android.graphics.Bitmap.Config.ARGB_8888);
+        bmp.copyPixelsFromBuffer(buf);
+        return android.graphics.Bitmap.createBitmap(bmp,
+                0, 0, img.getWidth(), img.getHeight());
+    }
+
     /** 释放虚拟屏 */
     public static void release() {
         try {
