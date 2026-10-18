@@ -620,6 +620,18 @@ public class TaskRunner {
                     return false;
                 }
             }
+            case "vd_test": {
+                // v2.54-spike：虚拟屏可行性验证（隐藏测试动作）
+                String result = VirtualDisplayTest.run(ctx);
+                log("虚拟屏测试结果：\n" + result);
+                lastOutput = result;
+                return result.contains("OK");
+            }
+            case "vd_release": {
+                VirtualDisplayTest.release();
+                log("虚拟屏已释放");
+                return true;
+            }
             case "screenshot": {
                 // 任务内截屏存档（无障碍优先，无需 root）
                 String path = st.optString("path", "");
