@@ -54,7 +54,31 @@ public class LlmClient {
     }
 
     /** 一问一答：POST /v1/chat/completions */
+    /**
+     * v2.51 借鉴 ApkClaw：失败指数退避重试（1s→2s→4s），401/403 不重试。
+     */
     public Result chat(String prompt) {
+        return withRetry(() -> doChat(prompt));
+    }
+
+    private Result withRetry(java.util.function.Supplier<Result> call) {
+        Result r = null;
+        long[] waits = {1000, 2000, 4000};
+        for (int i = 0; i <= waits.length; i++) {
+            r = call.get();
+            if (r.ok) return r;
+            // key 错了重试没用，直接返回
+            if (r.text != null && (r.text.contains("HTTP 401") || r.text.contains("HTTP 403"))) {
+                return r;
+            }
+            if (i < waits.length) {
+                try { Thread.sleep(waits[i]); } catch (InterruptedException ignored) {}
+            }
+        }
+        return r;
+    }
+
+    private Result doChat(String prompt) {
         Result r = new Result();
         try {
             HttpURLConnection c = open("/v1/chat/completions", "POST");
@@ -94,6 +118,11 @@ public class LlmClient {
      * image 传 Bitmap（会自动压缩到 720p JPEG），visionModel 为空则用主 model。
      */
     public Result chatVision(String prompt, android.graphics.Bitmap image,
+                             String visionModel) {
+        return withRetry(() -> doChatVision(prompt, image, visionModel));
+    }
+
+    private Result doChatVision(String prompt, android.graphics.Bitmap image,
                              String visionModel) {
         Result r = new Result();
         try {

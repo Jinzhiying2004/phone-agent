@@ -77,6 +77,10 @@ public class AgentLoop {
     private boolean remote = false;
     // v2.49 AutoGLM 式视觉优先：本任务是否可用 vision 输入（失败一次就回退纯文本）
     private boolean visionOk = true;
+    // v2.51 借鉴 ApkClaw：(屏幕指纹, 上一步动作) 二元组循环检测
+    private String lastPairSig = "";
+    private int pairRepeat = 0;
+    private String prevDoneActions = "";
     private final java.util.List<JSONObject> auditSteps = new java.util.ArrayList<>();
 
     /** 审计：每步动作明细（do/ok/输出摘要），供运行记录存档 */
@@ -220,7 +224,15 @@ public class AgentLoop {
         recoveryRounds = 0;
         pendingNudge = "";
         visionOk = true; // v2.49：每任务重置 vision 可用性
+        lastPairSig = "";
+        pairRepeat = 0;
+        prevDoneActions = "";
         log("📋 任务计划：" + taskPlan.size() + " 个子任务");
+        // v2.51 借鉴 ApkClaw：任务开始前按 Home，把手机重置到干净状态再动手
+        try {
+            Root.exec("input keyevent 3");
+            sleepQuiet(800);
+        } catch (Exception ignored) {}
         StringBuilder history = new StringBuilder();
         int rounds = 0;
         // 实时监管状态
@@ -286,6 +298,23 @@ public class AgentLoop {
             // ---- 实时监管（零 token 本地检查） ----
             String localWarn = null;
             // 1. 界面无变化检测 → v2.45：走自恢复阶梯，不只告警
+            // v2.51 借鉴 ApkClaw：(屏幕指纹, 上一步动作) 二元组；动作也相同=真卡死，更早触发
+            String pairSig = screenFingerprint(screen) + "|" + prevDoneActions;
+            if (!prevDoneActions.isEmpty() && pairSig.equals(lastPairSig)) {
+                pairRepeat++;
+                if (pairRepeat >= 2) {
+                    pairRepeat = 0;
+                    log("🔁 屏幕+动作二元组重复，判定卡死");
+                    if (!doRecoveryLadder()) {
+                        log("🛟 自恢复已达上限，停止任务");
+                        return false;
+                    }
+                    continue; // 本轮跳过思考，下轮重新看屏验证恢复效果
+                }
+            } else {
+                pairRepeat = 0;
+                lastPairSig = pairSig;
+            }
             if (screen.equals(lastScreen)) {
                 sameScreenCount++;
                 if (sameScreenCount >= 3) {
@@ -491,6 +520,7 @@ public class AgentLoop {
             history.append("第").append(step).append("步：想[").append(think)
                     .append("] 做[").append(doneActions.toString().trim()).append("]\n");
             history = trimHistory(history);
+            prevDoneActions = doneActions.toString().trim(); // v2.51：供下轮二元组循环检测
         }
         lastHistory = history.toString();
         log("达到最大步数（" + maxSteps + "），停止");
