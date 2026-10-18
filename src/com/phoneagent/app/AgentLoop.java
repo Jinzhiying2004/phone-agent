@@ -75,6 +75,8 @@ public class AgentLoop {
     private ActionRisk.Policy riskPolicy = null;
     private TaskRunner.Approver approver = null;
     private boolean remote = false;
+    // v2.49 AutoGLM 式视觉优先：本任务是否可用 vision 输入（失败一次就回退纯文本）
+    private boolean visionOk = true;
     private final java.util.List<JSONObject> auditSteps = new java.util.ArrayList<>();
 
     /** 审计：每步动作明细（do/ok/输出摘要），供运行记录存档 */
@@ -217,6 +219,7 @@ public class AgentLoop {
         recoveryLevel = 0;
         recoveryRounds = 0;
         pendingNudge = "";
+        visionOk = true; // v2.49：每任务重置 vision 可用性
         log("📋 任务计划：" + taskPlan.size() + " 个子任务");
         StringBuilder history = new StringBuilder();
         int rounds = 0;
@@ -266,6 +269,19 @@ public class AgentLoop {
                 }
             }
             String screen = serialize(nodes);
+
+            // v2.49 AutoGLM 式视觉优先：自适应截屏（首步必看；树稀疏/刚失败/每3步复核时看）
+            // 像人一样先看屏幕，而不是只读控件代码；token 省着花，不必每步都看
+            android.graphics.Bitmap shot = null;
+            boolean wantShot = visionOk
+                    && (step == 1 || nodes.size() < 8 || failStreak > 0 || step % 3 == 0);
+            if (wantShot) {
+                try {
+                    shot = ScreenshotUtil.capture(ctx);
+                } catch (Exception e) {
+                    log("截屏失败，本轮走纯文本");
+                }
+            }
 
             // ---- 实时监管（零 token 本地检查） ----
             String localWarn = null;
@@ -321,9 +337,23 @@ public class AgentLoop {
 
             // 大脑：组 prompt 问模型
             String prompt = buildPrompt(goal, screen, history.toString(), step,
-                    skillCardsSection(goal));
-            log("🤔 第 " + step + " 步思考中...");
-            LlmClient.Result r = llm.chat(prompt);
+                    skillCardsSection(goal), shot != null);
+            log("🤔 第 " + step + " 步思考中..." + (shot != null ? " 👁" : ""));
+            LlmClient.Result r;
+            if (shot != null) {
+                r = llm.chatVision(prompt, shot, null);
+                try { shot.recycle(); } catch (Exception ignored) {}
+                if (!r.ok) {
+                    // 模型不支持 vision（或调用失败），本任务回退纯文本
+                    log("视觉输入失败，回退纯文本模式");
+                    visionOk = false;
+                    prompt = buildPrompt(goal, screen, history.toString(), step,
+                            skillCardsSection(goal), false);
+                    r = llm.chat(prompt);
+                }
+            } else {
+                r = llm.chat(prompt);
+            }
             if (!r.ok) {
                 log("大脑请求失败：" + r.text);
                 return false;
@@ -620,11 +650,18 @@ public class AgentLoop {
 
     /** prompt 组装（纯逻辑，可独立测试） */
     String buildPrompt(String goal, String screen, String history, int step,
-                         String cards) {
+                         String cards, boolean hasShot) {
         StringBuilder p = new StringBuilder();
-        p.append("你是手机自动化助手。你看到的是安卓手机当前界面的控件列表，")
-                .append("格式为 [编号] 文字 (可点=可点击)。\n\n")
-                .append("用户目标：").append(goal).append("\n\n");
+        if (hasShot) {
+            // v2.49 AutoGLM 式视觉优先：截图是第一信息源
+            p.append("你是手机自动化助手。本轮附带了当前屏幕截图（已压缩），")
+                    .append("请像人一样先看截图理解界面，控件列表仅作辅助参考；")
+                    .append("截图里能看到但列表里没有的按钮/小字，以截图为准。\n\n");
+        } else {
+            p.append("你是手机自动化助手。你看到的是安卓手机当前界面的控件列表，")
+                    .append("格式为 [编号] 文字 (可点=可点击)。\n\n");
+        }
+        p.append("用户目标：").append(goal).append("\n\n");
         if (cards != null && !cards.isEmpty()) {
             p.append(cards).append("\n");
         }
@@ -688,6 +725,13 @@ public class AgentLoop {
                 .append("- read_file 读文件 {\"do\":\"read_file\",\"path\":\"/sdcard/a.txt\"}\n")
                 .append("- write_file 写文件 {\"do\":\"write_file\",\"path\":\"/sdcard/a.txt\",\"content\":\"hi\"}\n")
                 .append("- fetch_url 抓网页正文 {\"do\":\"fetch_url\",\"url\":\"https://...\"}\n\n")
+                .append("图标语义（看截图时像人一样认图标，不要当睁眼瞎）：\n")
+                .append("- 放大镜=搜索；齿轮=设置；×=关闭弹窗；←=返回上一页\n")
+                .append("- 房子=首页；人头=我的/个人中心；购物车=购物袋\n")
+                .append("- 三角=播放；喇叭=声音；相机=拍照/扫码\n")
+                .append("- 三个点 ⋮ /三横线 ☰ =更多菜单；＋=新增/添加\n")
+                .append("- 垃圾桶=删除；笔=编辑；星星/爱心=收藏；分享箭头=分享\n")
+                .append("- 图标按钮没有文字时：先用 vision 问出它的坐标，再 tap 点，严禁猜坐标\n\n")
                 .append("工作流（必须遵守）：\n")
                 .append("A. 理解：先看清目标是什么，不要急着动手\n")
                 .append("B. 拆解：把目标拆成 2-5 个小步骤，心里有 todo 列表\n")
