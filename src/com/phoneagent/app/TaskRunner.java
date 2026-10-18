@@ -662,36 +662,49 @@ public class TaskRunner {
                     if (!lastOutput.isEmpty()) log("输出: " + lastOutput);
                     return !out.startsWith("__ERR__");
                 } else {
+                    // v2.52：技能卡铁律——无论成功失败，结束必回桌面
+                    boolean cardOk = true;
+                    // 兼容两种格式：{"steps":[...]} 或裸数组 [...]
+                    JSONArray csteps = null;
+                    String ct = card.content == null ? ""
+                            : card.content.trim();
                     try {
-                        // 兼容两种格式：{"steps":[...]} 或裸数组 [...]
-                        JSONArray csteps = null;
-                        String ct = card.content == null ? ""
-                                : card.content.trim();
                         if (ct.startsWith("[")) {
                             csteps = new JSONArray(ct);
                         } else {
                             JSONObject cj = new JSONObject(ct);
                             csteps = cj.optJSONArray("steps");
                         }
-                        if (csteps == null || csteps.length() == 0) {
-                            log("技能卡步骤为空");
-                            return false;
-                        }
+                    } catch (Exception e) {
+                        log("技能卡解析异常: " + e.getMessage());
+                        return false;
+                    }
+                    if (csteps == null || csteps.length() == 0) {
+                        log("技能卡步骤为空");
+                        return false;
+                    }
+                    try {
                         for (int ci = 0; ci < csteps.length(); ci++) {
                             if (stopped) return false;
                             JSONObject cs = TaskRunner.substitute(
                                     csteps.getJSONObject(ci), params);
                             if (!runStep(cs, params, depth + 1)) {
                                 log("技能卡步骤失败于 " + (ci + 1));
-                                return false;
+                                cardOk = false;
+                                break;
                             }
                         }
-                        lastOutput = "";
-                        return true;
-                    } catch (Exception e) {
-                        log("技能卡执行异常: " + e.getMessage());
-                        return false;
+                    } finally {
+                        if (!cardOk) {
+                            try {
+                                rootCmd("input keyevent 3");
+                                log("🏠 技能卡异常结束，已回桌面");
+                            } catch (Exception ignored) {
+                            }
+                        }
                     }
+                    lastOutput = "";
+                    return cardOk;
                 }
             }
             case "skill": {
