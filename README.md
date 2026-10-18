@@ -22,6 +22,26 @@ token 用量远低于 OpenClaw 等全云端方案。支持无障碍 + root 双�
 
 远控 API 完整说明见 [API.md](API.md)，版本历史见 [CHANGELOG.md](CHANGELOG.md)。
 
+## 连接你自己的 Muse
+
+这套架构按"每人一套"设计：任何人从 GitHub 下了包，不改代码，按三步就能连上自己的 Muse。
+
+**第 1 步：手机端准备**
+- 装上 APK，打开「远控」服务
+- 每台手机首次启动会自动生成自己的 token（只存在手机本地，谁也看不到）
+
+**第 2 步：Muse 端准备**
+- 自己的 Muse 通过 Tailscale 连接器加入**自己的** tailnet
+- 手机装 Tailscale 登录同一账号，确认连接正常
+
+**第 3 步：配对**
+- 打开 App「云端操控」页，看到连接信息：IP、端口（v2.41 起默认 28789，可在 App 内修改）、token
+- 把这三项告诉自己的 Muse，就能直连操控了
+
+**安全说明**：远控服务只放行本机回环和 Tailscale 网段（100.64.0.0/10），
+同一 WiFi 下其他设备连不上——Tailscale 是云端操控的唯一通道。
+token 不要发给别人，谁拿到 token 就能操作你的手机。
+
 ## 构建
 
 手工编译链（aapt2 + javac + d8 + apksigner），无需 Gradle / Android Studio。
