@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>手机Agent 架构图</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: #0f172a; color: #e2e8f0; padding: 32px; }
+  h1 { text-align: center; font-size: 28px; margin-bottom: 8px;
+       background: linear-gradient(90deg, #60a5fa, #a78bfa);
+       -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .sub { text-align: center; color: #64748b; margin-bottom: 32px; font-size: 14px; }
+  .layer { margin-bottom: 24px; }
+  .layer-title { font-size: 13px; color: #94a3b8; text-transform: uppercase;
+                 letter-spacing: 2px; margin-bottom: 12px; text-align: center; }
+  .boxes { display: flex; justify-content: center; gap: 16px; flex-wrap: wrap; }
+  .box { background: #1e293b; border: 1px solid #334155; border-radius: 16px;
+         padding: 20px 24px; min-width: 180px; max-width: 260px; text-align: center;
+         transition: transform .2s; }
+  .box:hover { transform: translateY(-4px); border-color: #60a5fa; }
+  .box .icon { font-size: 36px; margin-bottom: 8px; }
+  .box .name { font-size: 16px; font-weight: 600; margin-bottom: 6px; }
+  .box .desc { font-size: 12px; color: #94a3b8; line-height: 1.6; }
+  .box.core { background: linear-gradient(135deg, #1e3a5f, #2d1b4e);
+              border-color: #60a5fa; min-width: 280px; }
+  .box.channel { border-color: #34d399; }
+  .arrow { text-align: center; font-size: 28px; color: #475569; margin: 8px 0; }
+  .arrow-label { text-align: center; font-size: 12px; color: #64748b; margin-top: -4px;
+                 margin-bottom: 8px; }
+  .flow { background: #1e293b; border-radius: 16px; padding: 24px; margin-top: 32px; }
+  .flow h2 { font-size: 18px; margin-bottom: 16px; text-align: center; }
+  .steps { display: flex; align-items: stretch; justify-content: center;
+           gap: 0; flex-wrap: wrap; }
+  .step { background: #0f172a; border: 1px solid #334155; border-radius: 12px;
+          padding: 16px; width: 150px; text-align: center; }
+  .step .n { display: inline-block; width: 28px; height: 28px; line-height: 28px;
+             background: #3b82f6; border-radius: 50%; font-size: 14px;
+             font-weight: 700; margin-bottom: 8px; }
+  .step .t { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+  .step .d { font-size: 11px; color: #94a3b8; line-height: 1.5; }
+  .step-arrow { align-self: center; font-size: 24px; color: #475569; padding: 0 8px; }
+  .legend { display: flex; justify-content: center; gap: 24px; margin-top: 24px;
+            font-size: 12px; color: #94a3b8; }
+  .legend span { display: flex; align-items: center; gap: 6px; }
+  .dot { width: 12px; height: 12px; border-radius: 4px; display: inline-block; }
+</style>
+</head>
+<body>
+<h1>📱 手机Agent 架构图</h1>
+<p class="sub">v3.09 · 三通道统一 · AgentLoop 为基座</p>
+
+<div class="layer">
+  <div class="layer-title">— 用户入口 · 三个消息通道 —</div>
+  <div class="boxes">
+    <div class="box channel">
+      <div class="icon">💬</div>
+      <div class="name">App 内对话</div>
+      <div class="desc">输入框 → 聊天气泡<br>打字机流式显示</div>
+    </div>
+    <div class="box channel">
+      <div class="icon">✈️</div>
+      <div class="name">Telegram Bot</div>
+      <div class="desc">长轮询 → editMessage 流式<br>/stop 打断 · typing 指示器</div>
+    </div>
+    <div class="box channel">
+      <div class="icon">🌐</div>
+      <div class="name">远控 HTTP</div>
+      <div class="desc">/task goal 模式<br>Tailscale + token 鉴权</div>
+    </div>
+  </div>
+</div>
+
+<div class="arrow">▼</div>
+<div class="arrow-label">都是消息通道，下沉到同一基座</div>
+
+<div class="layer">
+  <div class="layer-title">— 智能体基座 · 唯一实现 —</div>
+  <div class="boxes">
+    <div class="box core">
+      <div class="icon">🧠</div>
+      <div class="name">AgentLoop</div>
+      <div class="desc">主循环：感知 → 决策 → 执行 → 监管<br>DeepSeek V4 原生视觉 · 去公式化 prompt</div>
+    </div>
+  </div>
+</div>
+
+<div class="arrow">▼</div>
+
+<div class="layer">
+  <div class="layer-title">— 支撑模块 —</div>
+  <div class="boxes">
+    <div class="box">
+      <div class="icon">🖐</div>
+      <div class="name">TaskRunner</div>
+      <div class="desc">动作执行<br>root 优先 · 18+ 动作<br>虚拟屏 vd_*</div>
+    </div>
+    <div class="box">
+      <div class="icon">🔍</div>
+      <div class="name">Supervisor</div>
+      <div class="desc">监管者<br>卡住打断 + 给理由</div>
+    </div>
+    <div class="box">
+      <div class="icon">🧠</div>
+      <div class="name">UserMemory</div>
+      <div class="desc">长期记忆<br>偏好/事实持久化</div>
+    </div>
+    <div class="box">
+      <div class="icon">📝</div>
+      <div class="name">TaskRunLogger</div>
+      <div class="desc">任务日志<br>层级记录每步</div>
+    </div>
+    <div class="box">
+      <div class="icon">⚡</div>
+      <div class="name">LlmClient</div>
+      <div class="desc">模型调用<br>SSE 真流式</div>
+    </div>
+    <div class="box">
+      <div class="icon">🎯</div>
+      <div class="name">LocalIntentRouter</div>
+      <div class="desc">本地路由<br>零 token · 闲聊分流</div>
+    </div>
+  </div>
+</div>
+
+<div class="arrow">▼</div>
+
+<div class="layer">
+  <div class="layer-title">— 执行层 · 双通道 —</div>
+  <div class="boxes">
+    <div class="box">
+      <div class="icon">👆</div>
+      <div class="name">无障碍</div>
+      <div class="desc">读屏 · 手势<br>无 root 设备</div>
+    </div>
+    <div class="box">
+      <div class="icon">🔓</div>
+      <div class="name">Root</div>
+      <div class="desc">input 命令 · shell<br>优先通道更稳</div>
+    </div>
+    <div class="box">
+      <div class="icon">🖥️</div>
+      <div class="name">虚拟屏</div>
+      <div class="desc">后台自动化<br>不占用主屏</div>
+    </div>
+  </div>
+</div>
+
+<div class="flow">
+  <h2>任务执行流程</h2>
+  <div class="steps">
+    <div class="step"><div class="n">1</div><div class="t">意图识别</div><div class="d">本地路由 / 闲聊分流<br>零 token 快路径</div></div>
+    <div class="step-arrow">→</div>
+    <div class="step"><div class="n">2</div><div class="t">感知</div><div class="d">截屏直喂 V4<br>控件树辅助</div></div>
+    <div class="step-arrow">→</div>
+    <div class="step"><div class="n">3</div><div class="t">决策</div><div class="d">拼 prompt<br>JSON 输出动作</div></div>
+    <div class="step-arrow">→</div>
+    <div class="step"><div class="n">4</div><div class="t">执行</div><div class="d">TaskRunner<br>root 优先</div></div>
+    <div class="step-arrow">→</div>
+    <div class="step"><div class="n">5</div><div class="t">监管</div><div class="d">卡住打断<br>给理由</div></div>
+    <div class="step-arrow">→</div>
+    <div class="step"><div class="n">6</div><div class="t">记录</div><div class="d">写 task_*.log<br>层级存档</div></div>
+  </div>
+  <div class="legend">
+    <span><span class="dot" style="background:#34d399"></span> 消息通道</span>
+    <span><span class="dot" style="background:#60a5fa"></span> 智能体基座</span>
+    <span><span class="dot" style="background:#334155"></span> 支撑/执行</span>
+  </div>
+</div>
+</body>
+</html>
