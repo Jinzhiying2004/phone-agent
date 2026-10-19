@@ -61,6 +61,75 @@ public class LlmClient {
         return withRetry(() -> doChat(prompt));
     }
 
+    /** 流式回调：收到 token 片段时调用 */
+    public interface StreamCallback {
+        void onToken(String token);
+    }
+
+    /**
+     * v3.02：真流式输出（SSE）。
+     * 每个 token 到达时调 onToken，全收完返回完整 Result。
+     */
+    public Result chatStream(String prompt, StreamCallback cb) {
+        Result r = new Result();
+        StringBuilder full = new StringBuilder();
+        try {
+            HttpURLConnection c = open("/v1/chat/completions", "POST");
+            String payload = "{\"model\":\"" + esc(model)
+                    + "\",\"stream\":true"
+                    + ",\"messages\":[{\"role\":\"user\",\"content\":\""
+                    + esc(prompt) + "\"}]}";
+            byte[] bytes = payload.getBytes(StandardCharsets.UTF_8);
+            c.setDoOutput(true);
+            c.setRequestProperty("Content-Type", "application/json");
+            c.setRequestProperty("Accept", "text/event-stream");
+            try (OutputStream os = c.getOutputStream()) {
+                os.write(bytes);
+            }
+            int code = c.getResponseCode();
+            if (code != 200) {
+                r.ok = false;
+                r.text = "HTTP " + code + "：" + brief(readBody(c, code));
+                return r;
+            }
+            // 逐行读 SSE
+            try (java.io.BufferedReader br = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(c.getInputStream(),
+                            StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = br.readLine()) != null) {
+                    line = line.trim();
+                    if (!line.startsWith("data:")) continue;
+                    String data = line.substring(5).trim();
+                    if ("[DONE]".equals(data)) break;
+                    try {
+                        org.json.JSONObject o = new org.json.JSONObject(data);
+                        org.json.JSONArray choices = o.optJSONArray("choices");
+                        if (choices == null || choices.length() == 0) continue;
+                        org.json.JSONObject delta = choices.optJSONObject(0)
+                                .optJSONObject("delta");
+                        if (delta == null || delta.isNull("content")) continue;
+                        // v3.04：org.json 的 optString 对 JSON null 会返回字符串"null"，必须过滤
+                        String token = delta.optString("content", "");
+                        if (token.isEmpty() || "null".equals(token)) continue;
+                        full.append(token);
+                        if (cb != null) {
+                            try { cb.onToken(token); } catch (Exception ignored) {}
+                        }
+                    } catch (Exception ignored) {
+                        // 单行解析失败跳过
+                    }
+                }
+            }
+            r.ok = true;
+            r.text = full.toString();
+        } catch (Exception e) {
+            r.ok = false;
+            r.text = "请求失败：" + e.getMessage();
+        }
+        return r;
+    }
+
     private Result withRetry(java.util.function.Supplier<Result> call) {
         Result r = null;
         long[] waits = {1000, 2000, 4000};

@@ -216,8 +216,31 @@ public class AgentLoop {
      *
      * @return true=模型判定完成，false=中断/失败/达最大步数
      */
+    // v2.97：流式输出开关
+    private boolean streamOutput() {
+        try {
+            return ctx.getSharedPreferences("agent", Context.MODE_PRIVATE)
+                    .getBoolean("stream_output", true);
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    // v2.93：任务运行日志
+    private TaskRunLogger taskLogger = null;
+
+    /** v3.08：获取本次任务日志路径（供 UI 显示入口） */
+    public String getTaskLogPath() {
+        return taskLogger != null ? taskLogger.getPath() : null;
+    }
+
     public boolean run(String goal, int maxSteps) {
         log("🎯 目标：" + goal);
+        // v2.93：开始记录任务详细过程
+        try {
+            taskLogger = new TaskRunLogger(ctx, goal);
+        } catch (Exception ignored) {
+        }
         // v2.45：结构化任务计划（拆解一次，状态机推进）
         taskPlan = buildTaskPlan(goal);
         recoveryLevel = 0;
@@ -285,8 +308,8 @@ public class AgentLoop {
             // v2.49 AutoGLM 式视觉优先：自适应截屏（首步必看；树稀疏/刚失败/每3步复核时看）
             // 像人一样先看屏幕，而不是只读控件代码；token 省着花，不必每步都看
             android.graphics.Bitmap shot = null;
-            boolean wantShot = visionOk
-                    && (step == 1 || nodes.size() < 8 || failStreak > 0 || step % 3 == 0);
+            // v2.81：V4 原生多模态，每步都截图直喂主模型
+            boolean wantShot = true;
             if (wantShot) {
                 try {
                     shot = ScreenshotUtil.capture(ctx);
@@ -353,6 +376,9 @@ public class AgentLoop {
                     log("🔍 监管者巡检中…");
                     monitorAdvice = Supervisor.monitor(llm, goal, recent, step);
                     if (monitorAdvice != null) log(monitorAdvice);
+                    if (monitorAdvice != null && taskLogger != null) {
+                        taskLogger.supervisor(monitorAdvice);
+                    }
                 } catch (Exception ignored) {
                 }
             }
@@ -368,6 +394,10 @@ public class AgentLoop {
             String prompt = buildPrompt(goal, screen, history.toString(), step,
                     skillCardsSection(goal), shot != null);
             log("🤔 第 " + step + " 步思考中..." + (shot != null ? " 👁" : ""));
+            if (taskLogger != null) {
+                taskLogger.stepStart(step);
+                if (shot != null) taskLogger.screenshot();
+            }
             LlmClient.Result r;
             if (shot != null) {
                 r = llm.chatVision(prompt, shot, null);
@@ -394,10 +424,36 @@ public class AgentLoop {
                 return false;
             }
             String think = decision.optString("think", "");
-            if (!think.isEmpty()) log("💭 " + think);
+            if (!think.isEmpty()) {
+                // v2.97：流式输出关闭时不显示中间思考
+                if (streamOutput()) log("💭 " + think);
+            }
+            if (taskLogger != null) {
+                taskLogger.think(think);
+            }
+            String progState = decision.optString("state", "");
+            if (taskLogger != null) {
+                taskLogger.state(progState);
+            }
+            if (!progState.isEmpty()) {
+                if (streamOutput()) log("📍 " + progState);
+            }
             if (decision.optBoolean("done", false)) {
                 lastHistory = history.toString();
-                log("✅ 模型判定任务完成");
+                // v2.84：done 时把 answer 当最终答复展示
+                String answer = decision.optString("answer", "");
+                if (!answer.isEmpty()) {
+                    log("🤖 " + answer);
+                } else if (!think.isEmpty()) {
+                    log("🤖 " + think);
+                }
+                log("✅ 任务完成");
+                // v2.93：记录任务结束
+                if (taskLogger != null) {
+                    taskLogger.finish(true,
+                            answer.isEmpty() ? think : answer);
+                    log("📝 任务日志已保存");
+                }
                 return true;
             }
 
@@ -455,8 +511,12 @@ public class AgentLoop {
                 if (recentActs.size() == 3) {
                     String[] arr = recentActs.toArray(new String[0]);
                     if (arr[0].equals(arr[1]) && arr[1].equals(arr[2])) {
+                        // v2.91：给理由，不只喊停
                         String repWarn = "【监管者实时提醒】连续 3 次重复同一动作（"
-                                + arr[0] + "），别再重复，换方法";
+                                + arr[0] + "）\n"
+                                + "理由：同一动作连做 3 次说明这条路走不通，"
+                                + "屏幕没变化就是没生效\n"
+                                + "建议：换方法（文本点不到→vision 定位坐标→tap 坐标）";
                         log(repWarn);
                         history.append("\n").append(repWarn).append("\n");
                         recentActs.clear();
@@ -692,12 +752,30 @@ public class AgentLoop {
                     .append("格式为 [编号] 文字 (可点=可点击)。\n\n");
         }
         p.append("用户目标：").append(goal).append("\n\n");
+        // v3.09：App 自身功能认知——用户说的是 App 功能时不要去系统设置里找
+        p.append("【App 自身功能】你是「手机Agent」App 里的智能体。")
+                .append("用户提到以下词时，说的是 App 自己的功能，不是手机系统应用，")
+                .append("不要去系统设置里找，直接用 answer 回复说明：\n")
+                .append("- 「任务日志」= 每次任务自动存的详细过程文件（files/task_logs/），"
+                        + "在「我的」页可查看；\n")
+                .append("- 「监管者」= 监督你执行、发现卡住会打断并给理由的模块；\n")
+                .append("- 「技能卡」= 存好的自动化流程（如汽水音乐领时长）；\n")
+                .append("- 「流式输出」= 任务执行时是否实时显示中间思考的开关；\n")
+                .append("- 「远控」「Telegram 机器人」= App 的另外两个使用通道。\n")
+                .append("如果用户是在提 App 功能需求（如「任务日志只在我需要时发」），")
+                .append("用 answer 简短回应「收到，这个需求我记下了」之类，不要编造去改设置。\n\n");
         if (cards != null && !cards.isEmpty()) {
             p.append(cards).append("\n");
         }
         if (!conversationContext.isEmpty()) {
-            p.append("【对话上下文】本次会话最近的对话，供参考：\n")
+            p.append("【对话上下文】本次会话最近的对话，")
+                    .append("你必须利用其中的信息，不要重复询问用户已说过的内容：\n")
                     .append(conversationContext).append("\n\n");
+        }
+        // v2.85：长期记忆注入
+        String memDesc = UserMemory.describeForPrompt(ctx);
+        if (!memDesc.isEmpty()) {
+            p.append(memDesc);
         }
         if (!thinkerPlan.isEmpty()) {
             p.append("【思考者规划】请按以下计划执行，"
@@ -727,7 +805,8 @@ public class AgentLoop {
         p.append("当前界面（第 ").append(step).append(" 步）：\n")
                 .append(screen).append("\n")
                 .append("你每次回复必须是纯 JSON（不要 markdown 包裹），格式：\n")
-                .append("{\"think\":\"简短思考\",\"done\":false,")
+                .append("{\"think\":\"思考过程（用人话写）\",\"state\":\"已完成X/下一步Y\",")
+                .append("\"done\":false,")
                 .append("\"actions\":[{\"do\":\"tap_text\",\"text\":\"xxx\"}]}\n\n")
                 .append("可用动作：\n")
                 .append("- tap_text 按文本点 {\"do\":\"tap_text\",\"text\":\"设置\"}\n")
@@ -754,7 +833,9 @@ public class AgentLoop {
                 .append("- shell 执行命令（root） {\"do\":\"shell\",\"cmd\":\"ls /sdcard\"}\n")
                 .append("- read_file 读文件 {\"do\":\"read_file\",\"path\":\"/sdcard/a.txt\"}\n")
                 .append("- write_file 写文件 {\"do\":\"write_file\",\"path\":\"/sdcard/a.txt\",\"content\":\"hi\"}\n")
-                .append("- fetch_url 抓网页正文 {\"do\":\"fetch_url\",\"url\":\"https://...\"}\n\n")
+                .append("- fetch_url 抓网页正文 {\"do\":\"fetch_url\",\"url\":\"https://...\"}\n")
+                .append("- remember 记住用户信息 {\"do\":\"remember\",\"key\":\"喜欢的歌手\",\"value\":\"周杰伦\"}\n")
+                .append("  （用户说了偏好/事实时顺手记住，下次直接用，别再问）\n\n")
                 .append("图标语义（看截图时像人一样认图标，不要当睁眼瞎）：\n")
                 .append("- 放大镜=搜索；齿轮=设置；×=关闭弹窗；←=返回上一页\n")
                 .append("- 房子=首页；人头=我的/个人中心；购物车=购物袋\n")
@@ -762,16 +843,10 @@ public class AgentLoop {
                 .append("- 三个点 ⋮ /三横线 ☰ =更多菜单；＋=新增/添加\n")
                 .append("- 垃圾桶=删除；笔=编辑；星星/爱心=收藏；分享箭头=分享\n")
                 .append("- 图标按钮没有文字时：先用 vision 问出它的坐标，再 tap 点，严禁猜坐标\n\n")
-                .append("工作流（必须遵守）：\n")
-                .append("A. 理解：先看清目标是什么，不要急着动手\n")
-                .append("B. 拆解：把目标拆成 2-5 个小步骤，心里有 todo 列表\n")
-                .append("C. 执行：每次只做 1 个小动作\n")
-                .append("D. 验证：动作后看屏幕是否按预期变化，没变化=失败\n")
-                .append("E. 排错：失败就换方法（文本点不到→vision 看坐标→tap 坐标），"
-                        + "不要重复同一个失败动作；"
-                        + "同一子任务内试过且失败的方法会被系统直接拦截不再执行，"
-                        + "【硬性禁令】被拦截的方法换写法再用也一样被拦，别浪费步数\n")
-                .append("F. 总结：全部做完后说做了什么、结果如何\n\n")
+                .append("做事原则（自己判断，不是死流程）：\n")
+                .append("- 先看明白再动手：截图+列表一起看\n")
+                .append("- 独立动作可一次多个，有依赖的分开\n")
+                .append("- 失败换方法，别死磕；输出前自查参数对不对\n\n")
                 .append("👆 点击智能（核心能力）：\n")
                 .append("- 看到目标先想：这是文字按钮还是图标？\n")
                 .append("- 文字按钮 → 直接 tap_text 点文字\n")
@@ -782,24 +857,13 @@ public class AgentLoop {
                         + "必须先用 vision 问出坐标再 tap\n")
                 .append("- 不要连续点同一个位置 3 次以上\n\n")
                 .append("规则：\n")
-                .append("0a. ⭐ 先复述再动手：首轮 think 必须用一句话复述用户目标"
-                        + "+\"做成什么样算成功\"，然后再给动作\n")
-                .append("0b. ⭐ 眼睛不够用时看屏幕：如果文本列表里找不到目标"
-                        + "（比如相机快门是图标、要判断前后摄像头），"
-                        + "就用 vision 提问，别反复乱点；"
-                        + "vision 返回坐标后，用 tap 按坐标点\n")
-                .append("0. ⭐ Termux 优先：凡是命令行能搞定的（查资料、计算、文件处理、"
-                        + "联网取数），一律先用 termux，别急着点屏幕；"
-                        + "需要外部知识时先用 search 搜，拿到结果再行动\n")
-                .append("1. 每次只做 1-3 个小动作，不要贪多\n")
-                .append("2. 动作失败就换思路，不要重复点同一个\n")
-                .append("3. 目标达成时返回 {\"think\":\"...\",\"done\":true,\"actions\":[]}\n")
-                .append("3b. 当前子任务的验证标准达成时，在 JSON 里加 "
-                        + "\"subtask_done\":true（任务计划里标了验证标准的看计划）\n")
-                .append("4. 只输出 JSON，不要解释\n")
-                .append("5. 注意：shell/termux/联网/写文件是高风险动作，"
-                        + "执行前可能要用户确认；能用低风险动作（点击/读屏）"
-                        + "搞定的别绕路\n");
+                .append("0a. ⭐ 首轮一句话说清目标+怎样算成功\n")
+                .append("0. ⭐ Termux 优先：命令行能搞定的别点屏幕\n")
+                .append("1. 独立动作可一次多个，有依赖的单发\n")
+                .append("2. 失败换方法，别重复\n")
+                .append("3. 做完返回 {\"think\":\"...\",\"state\":\"全部完成\",\"done\":true,\n")
+                .append("\"answer\":\"给用户的最终答复（做了什么/结果如何）\",\"actions\":[]}\n")
+                .append("4. 只输出 JSON\n");
         return p.toString();
     }
 

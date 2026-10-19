@@ -48,14 +48,19 @@ public class ActionRisk {
 
     static {
         // LOW：只读/无害
-        put(Level.LOW, "wait_text", "assert_text", "sleep", "screenshot");
+        put(Level.LOW, "wait_text", "assert_text", "sleep", "screenshot",
+                "app_list", "sys_get", "getprop", "ps", "remember");
         // MEDIUM：设备控制 / 本地读
         put(Level.MEDIUM, "tap", "tap_text", "tap_id", "swipe", "back",
-                "input", "launch", "read_file", "use_card", "skill");
+                "input", "launch", "read_file", "use_card", "skill",
+                "screen", "brightness", "volume", "vibrate", "torch",
+                "wifi", "bluetooth", "app_kill");
         // HIGH：外部效应 / 网络 / 写文件
-        put(Level.HIGH, "termux", "search", "fetch_url", "write_file");
-        // CRITICAL：破坏性（root 任意命令）
-        put(Level.CRITICAL, "shell");
+        put(Level.HIGH, "termux", "search", "fetch_url", "write_file",
+                "app_install", "sys_put", "airplane");
+        // CRITICAL：破坏性（root 任意命令 / 删应用 / 重启）
+        put(Level.CRITICAL, "shell", "app_uninstall", "app_clear",
+                "reboot", "kill");
     }
 
     private static void put(Level lv, String... actions) {

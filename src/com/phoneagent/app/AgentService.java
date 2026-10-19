@@ -28,6 +28,36 @@ public class AgentService extends Service {
 
     private static volatile boolean running = false;
 
+    // v3.05：TgBot 搬到 Service 里，后台真运行
+    private TgBot tgBot;
+    private static volatile boolean tgRunning = false;
+
+    public static boolean isTgRunning() {
+        return tgRunning;
+    }
+
+    // v3.05：静态控制 TG（供 MainActivity 调用）
+    private static AgentService instance = null;
+
+    public static void startTgStatic(Context ctx) {
+        if (instance != null) {
+            instance.startTgBot();
+        } else {
+            // Service 未运行，先拉起服务（onCreate 会自动启 TG）
+            Intent i = new Intent(ctx, AgentService.class);
+            if (Build.VERSION.SDK_INT >= 26) {
+                ctx.startForegroundService(i);
+            } else {
+                ctx.startService(i);
+            }
+        }
+    }
+
+    public static void stopTgStatic() {
+        if (instance != null) instance.stopTgBot();
+        tgRunning = false;
+    }
+
     public static boolean isRunning() {
         return running;
     }
@@ -76,6 +106,7 @@ public class AgentService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        instance = this;
         String chId = "agent_svc";
         if (Build.VERSION.SDK_INT >= 26) {
             NotificationChannel ch = new NotificationChannel(
@@ -87,8 +118,10 @@ public class AgentService extends Service {
                 ? new Notification.Builder(this, chId)
                 : new Notification.Builder(this);
         int port = getPort(this);
+        // v3.05：通知栏显示 TG 状态
+        String tgState = tgRunning ? " · TG机器人运行中" : "";
         Notification n = nb.setContentTitle("手机Agent")
-                .setContentText("远程控制服务运行中（端口 " + port + "）")
+                .setContentText("远程控制服务运行中（端口 " + port + "）" + tgState)
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .build();
         startForeground(1, n);
@@ -99,8 +132,48 @@ public class AgentService extends Service {
             // 定时任务调度循环（每分钟检查一次）
             schedHandler = new android.os.Handler(android.os.Looper.getMainLooper());
             schedHandler.postDelayed(schedTick, 30_000);
+            // v3.05：TG 机器人随服务自启（后台真运行）
+            tryStartTgBot();
         } catch (Exception e) {
             stopSelf();
+        }
+    }
+
+    /** v3.05：尝试启动 TG 机器人（有 token 且开启自启） */
+    private void tryStartTgBot() {
+        try {
+            boolean auto = getSharedPreferences("agent", MODE_PRIVATE)
+                    .getBoolean("tg_autostart", true);
+            TgStore tgStore = new TgStore(this);
+            if (auto && tgStore.hasToken()) {
+                startTgBot();
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** v3.05：启动 TG（可被 MainActivity 调用） */
+    public void startTgBot() {
+        try {
+            if (tgBot == null) {
+                TgStore tgStore = new TgStore(this);
+                LlmStore llmStore = new LlmStore(this);
+                tgBot = new TgBot(this, tgStore, llmStore,
+                        msg -> android.util.Log.i("TgBot", msg));
+            }
+            tgBot.start();
+            tgRunning = true;
+        } catch (Exception e) {
+            android.util.Log.e("AgentService", "TG 启动失败: " + e.getMessage());
+        }
+    }
+
+    /** v3.05：停止 TG（可被 MainActivity 调用） */
+    public void stopTgBot() {
+        try {
+            if (tgBot != null) tgBot.stop();
+            tgRunning = false;
+        } catch (Exception ignored) {
         }
     }
 
@@ -112,6 +185,9 @@ public class AgentService extends Service {
     @Override
     public void onDestroy() {
         running = false;
+        // v3.05：服务销毁时停 TG
+        stopTgBot();
+        instance = null;
         if (schedHandler != null) schedHandler.removeCallbacks(schedTick);
         if (http != null) http.stop();
         super.onDestroy();

@@ -84,6 +84,7 @@ public class Supervisor {
                     + recentHistory + "\n\n"
                     + "只输出纯 JSON：\n"
                     + "{\"status\":\"ok\"或\"warning\"或\"stuck\","
+                    + "\"reason\":\"为什么这样判（具体指出哪几步有问题、错在哪，ok 时为空）\","
                     + "\"advice\":\"一句话干预意见（ok 时为空字符串）\"}";
             LlmClient.Result r = client.chat(prompt);
             if (!r.ok) return null;
@@ -91,11 +92,16 @@ public class Supervisor {
             if (o == null) return null;
             String status = o.optString("status", "ok");
             if ("ok".equals(status)) return null;
+            String reason = o.optString("reason", "");
             String advice = o.optString("advice", "");
-            if (advice.isEmpty()) return null;
-            return "【监管者实时提醒】（第" + step + "步，"
-                    + ("stuck".equals(status) ? "疑似卡住" : "注意") + "）"
-                    + advice;
+            if (advice.isEmpty() && reason.isEmpty()) return null;
+            // v2.91：打断必须给理由，让 agent 明白错在哪
+            StringBuilder sb = new StringBuilder();
+            sb.append("【监管者实时提醒】（第").append(step).append("步，")
+                    .append("stuck".equals(status) ? "疑似卡住" : "注意").append("）\n");
+            if (!reason.isEmpty()) sb.append("理由：").append(reason).append("\n");
+            if (!advice.isEmpty()) sb.append("建议：").append(advice);
+            return sb.toString();
         } catch (Exception e) {
             return null;
         }

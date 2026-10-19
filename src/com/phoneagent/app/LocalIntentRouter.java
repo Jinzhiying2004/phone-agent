@@ -211,6 +211,27 @@ public class LocalIntentRouter {
 
     // ---------------- 响铃模式 ----------------
 
+    /** v2.82：判断是否为纯聊天（非任务）。打招呼/感谢/闲聊等不走任务流。 */
+    private static final Pattern P_CHAT =
+            Pattern.compile("^(你好|您好|hi|hello|嗨|早安|早上好|晚安|谢谢|感谢|多谢|再见|拜拜|"
+                    + "你是谁|你叫什么|你好呀|hello|hey)[！!。.,，]*$",
+                    Pattern.CASE_INSENSITIVE);
+
+    /** 动作动词：出现这些词大概率是任务，不是闲聊 */
+    private static final Pattern P_TASK_VERB =
+            Pattern.compile("打开|启动|播放|搜索|查找|设置|调节|安装|卸载|拍照|截图|"
+                    + "发|查|订|买|定|下载|上传|删除|清理|备份|同步|分享|翻译");
+
+    public static boolean isChat(String goal) {
+        if (goal == null) return false;
+        String t = goal.trim();
+        // 明确的打招呼/闲聊
+        if (P_CHAT.matcher(t).matches()) return true;
+        // 很短且不含动作动词 → 可能是闲聊
+        if (t.length() <= 8 && !P_TASK_VERB.matcher(t).find()) return true;
+        return false;
+    }
+
     private static RouteResult tryRinger(Context ctx, String t) {
         int mode = -1;
         String label = null;

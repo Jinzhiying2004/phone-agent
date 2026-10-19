@@ -86,6 +86,16 @@ public class TaskRunner {
         return s.length() > n ? s.substring(0, n) + "..." : s;
     }
 
+    // v2.90：root 优先策略——有 root 用命令，无 root 用无障碍
+    private Boolean cachedRoot = null;
+
+    private boolean hasRoot() {
+        if (cachedRoot == null) {
+            cachedRoot = Root.findSu() != null;
+        }
+        return cachedRoot;
+    }
+
     private boolean rootCmd(String cmd) {
         try {
             String[] r = RootShell.get().exec(cmd, 30);
@@ -320,9 +330,12 @@ public class TaskRunner {
             case "tap": {
                 int x = st.getInt("x"), y = st.getInt("y");
                 log("点击 (" + x + "," + y + ")");
-                if (AgentAccessibilityService.tapAt(x, y)) return true;
-                log("手势失败，尝试 root input");
-                return rootCmd("input tap " + x + " " + y);
+                // v2.90：有 root 则命令优先（更稳），无 root 走无障碍
+                if (hasRoot()) {
+                    if (rootCmd("input tap " + x + " " + y)) return true;
+                    log("root 点击失败，回退无障碍");
+                }
+                return AgentAccessibilityService.tapAt(x, y);
             }
             case "tap_text": {
                 String kw = st.getString("text");
@@ -335,10 +348,14 @@ public class TaskRunner {
                             + "用 vision 按截图问出坐标再 tap");
                     return false;
                 }
+                // v2.90：有 root 则直接命令点坐标（最稳）
+                if (hasRoot()) {
+                    if (rootCmd("input tap " + hit.cx + " " + hit.cy)) return true;
+                    log("root 点击失败，回退无障碍");
+                }
                 if (AgentAccessibilityService.clickNode(hit)) return true;
                 log("节点点击失败，改点坐标 (" + hit.cx + "," + hit.cy + ")");
-                if (AgentAccessibilityService.tapAt(hit.cx, hit.cy)) return true;
-                return rootCmd("input tap " + hit.cx + " " + hit.cy);
+                return AgentAccessibilityService.tapAt(hit.cx, hit.cy);
             }
             case "wait_text": {
                 String kw = st.getString("text");
@@ -370,18 +387,25 @@ public class TaskRunner {
                 JSONArray f = st.getJSONArray("from"), t = st.getJSONArray("to");
                 int ms = st.optInt("ms", 400);
                 log("滑动");
-                if (AgentAccessibilityService.swipe(
-                        f.getInt(0), f.getInt(1), t.getInt(0), t.getInt(1), ms)) return true;
-                return rootCmd("input swipe " + f.getInt(0) + " " + f.getInt(1)
-                        + " " + t.getInt(0) + " " + t.getInt(1) + " " + ms);
+                // v2.90：有 root 则命令优先
+                if (hasRoot()) {
+                    if (rootCmd("input swipe " + f.getInt(0) + " " + f.getInt(1)
+                            + " " + t.getInt(0) + " " + t.getInt(1) + " " + ms)) return true;
+                    log("root 滑动失败，回退无障碍");
+                }
+                return AgentAccessibilityService.swipe(
+                        f.getInt(0), f.getInt(1), t.getInt(0), t.getInt(1), ms);
             }
             case "sleep": {
                 Thread.sleep(st.optInt("s", 2) * 1000L);
                 return true;
             }
             case "back": {
-                if (AgentAccessibilityService.goBack()) return true;
-                return rootCmd("input keyevent 4");
+                // v2.90：有 root 则命令优先
+                if (hasRoot()) {
+                    if (rootCmd("input keyevent 4")) return true;
+                }
+                return AgentAccessibilityService.goBack();
             }
             case "shell": {
                 String cmd = st.getString("cmd");
@@ -785,6 +809,199 @@ public class TaskRunner {
                     log("截屏保存失败: " + e.getMessage());
                     return false;
                 }
+            }
+            // ============ v2.78：硬件/软件/系统底层远控 ============
+            case "screen": {
+                // 屏幕亮/灭：{"do":"screen","action":"on|off"}
+                String a = st.optString("action", "on");
+                String r = "on".equals(a)
+                        ? rootCmdOut("input keyevent 224")
+                        : rootCmdOut("input keyevent 26");
+                log("屏幕" + a + ": " + r);
+                return true;
+            }
+            case "brightness": {
+                // 亮度 0-255：{"do":"brightness","value":128}
+                int v = st.optInt("value", 128);
+                v = Math.max(0, Math.min(255, v));
+                String r = rootCmdOut(
+                        "settings put system screen_brightness " + v);
+                log("亮度=" + v + ": " + r);
+                return true;
+            }
+            case "volume": {
+                // 音量：{"do":"volume","stream":"media","value":8}
+                String stream = st.optString("stream", "media");
+                Integer vol = st.has("value") ? st.optInt("value") : null;
+                String r = HardwareControl.volume(ctx, stream, vol);
+                log("音量 " + stream + ": " + r);
+                return true;
+            }
+            case "vibrate": {
+                // 震动：{"do":"vibrate","duration":200}
+                long ms = st.optLong("duration", 200);
+                String r = HardwareControl.vibrate(ctx, ms);
+                log("震动 " + ms + "ms: " + r);
+                return true;
+            }
+            case "torch": {
+                // 手电筒：{"do":"torch","on":true}
+                boolean on = st.optBoolean("on", true);
+                String r = HardwareControl.torch(ctx, on);
+                log("手电筒 " + (on ? "开" : "关") + ": " + r);
+                return true;
+            }
+            case "wifi": {
+                // WiFi：{"do":"wifi","on":true}
+                boolean on = st.optBoolean("on", true);
+                String r = rootCmdOut(
+                        "svc wifi " + (on ? "enable" : "disable"));
+                log("WiFi " + (on ? "开" : "关") + ": " + r);
+                return true;
+            }
+            case "bluetooth": {
+                // 蓝牙：{"do":"bluetooth","on":true}
+                boolean on = st.optBoolean("on", true);
+                String r = rootCmdOut(
+                        "svc bluetooth " + (on ? "enable" : "disable"));
+                log("蓝牙 " + (on ? "开" : "关") + ": " + r);
+                return true;
+            }
+            case "airplane": {
+                // 飞行模式：{"do":"airplane","on":true}
+                boolean on = st.optBoolean("on", true);
+                rootCmdOut("settings put global airplane_mode_on "
+                        + (on ? "1" : "0"));
+                String r = rootCmdOut(
+                        "am broadcast -a android.intent.action.AIRPLANE_MODE "
+                        + "--ez state " + on);
+                log("飞行模式 " + (on ? "开" : "关") + ": " + r);
+                return true;
+            }
+            case "app_install": {
+                // 安装 APK：{"do":"app_install","path":"/sdcard/x.apk"}
+                String p = st.optString("path", "");
+                if (p.isEmpty()) {
+                    log("app_install 缺少 path");
+                    return false;
+                }
+                String r = rootCmdOut("pm install -r \"" + p + "\"");
+                log("安装: " + r);
+                return r.contains("Success");
+            }
+            case "app_uninstall": {
+                // 卸载：{"do":"app_uninstall","package":"com.x"}
+                String pkg = st.optString("package", "");
+                if (pkg.isEmpty()) {
+                    log("app_uninstall 缺少 package");
+                    return false;
+                }
+                String r = rootCmdOut("pm uninstall " + pkg);
+                log("卸载 " + pkg + ": " + r);
+                return r.contains("Success");
+            }
+            case "app_kill": {
+                // 强行停止：{"do":"app_kill","package":"com.x"}
+                String pkg = st.optString("package", "");
+                if (pkg.isEmpty()) {
+                    log("app_kill 缺少 package");
+                    return false;
+                }
+                String r = rootCmdOut("am force-stop " + pkg);
+                log("强行停止 " + pkg + ": " + r);
+                return true;
+            }
+            case "app_clear": {
+                // 清除数据：{"do":"app_clear","package":"com.x"}
+                String pkg = st.optString("package", "");
+                if (pkg.isEmpty()) {
+                    log("app_clear 缺少 package");
+                    return false;
+                }
+                String r = rootCmdOut("pm clear " + pkg);
+                log("清除数据 " + pkg + ": " + r);
+                return r.contains("Success");
+            }
+            case "app_list": {
+                // 应用列表：{"do":"app_list"}
+                String r = rootCmdOut("pm list packages -f");
+                log("应用列表:\n" + r);
+                return true;
+            }
+            case "reboot": {
+                // 重启/关机：{"do":"reboot","mode":""} mode: recovery/bootloader/shutdown
+                String mode = st.optString("mode", "");
+                String cmd = "shutdown".equals(mode) ? "reboot -p"
+                        : "recovery".equals(mode) ? "reboot recovery"
+                        : "bootloader".equals(mode) ? "reboot bootloader"
+                        : "reboot";
+                log("执行 " + cmd + "（手机将重启）");
+                rootCmdOut(cmd);
+                return true;
+            }
+            case "sys_get": {
+                // 读系统设置：{"do":"sys_get","namespace":"system","key":"screen_brightness"}
+                String ns = st.optString("namespace", "system");
+                String key = st.optString("key", "");
+                if (key.isEmpty()) {
+                    log("sys_get 缺少 key");
+                    return false;
+                }
+                String r = rootCmdOut("settings get " + ns + " " + key);
+                log(ns + "/" + key + " = " + r.trim());
+                return true;
+            }
+            case "sys_put": {
+                // 写系统设置：{"do":"sys_put","namespace":"system","key":"k","value":"v"}
+                String ns = st.optString("namespace", "system");
+                String key = st.optString("key", "");
+                String val = st.optString("value", "");
+                if (key.isEmpty()) {
+                    log("sys_put 缺少 key");
+                    return false;
+                }
+                String r = rootCmdOut(
+                        "settings put " + ns + " " + key + " \"" + val + "\"");
+                log("设置 " + ns + "/" + key + "=" + val + ": " + r);
+                return true;
+            }
+            case "getprop": {
+                // 系统属性：{"do":"getprop","key":"ro.build.version.release"}
+                String key = st.optString("key", "");
+                String r = rootCmdOut("getprop " + key);
+                log("getprop " + key + ":\n" + r.trim());
+                return true;
+            }
+            case "ps": {
+                // 进程列表：{"do":"ps","filter":"com.x"}
+                String f = st.optString("filter", "");
+                String r = rootCmdOut("ps -A"
+                        + (f.isEmpty() ? "" : " | grep " + f));
+                log("进程:\n" + r);
+                return true;
+            }
+            case "kill": {
+                // 杀进程：{"do":"kill","pid":1234}
+                int pid = st.optInt("pid", 0);
+                if (pid <= 0) {
+                    log("kill 缺少 pid");
+                    return false;
+                }
+                String r = rootCmdOut("kill -9 " + pid);
+                log("kill " + pid + ": " + r);
+                return true;
+            }
+            case "remember": {
+                // v2.85：写长期记忆 {"do":"remember","key":"喜欢的歌手","value":"周杰伦"}
+                String k = st.optString("key", "");
+                String v = st.optString("value", "");
+                if (k.isEmpty()) {
+                    log("remember 缺少 key");
+                    return false;
+                }
+                UserMemory.put(ctx, k, v);
+                log("已记住：" + k + "＝" + v);
+                return true;
             }
             case "use_card": {
                 // 调用技能卡：script 型跑 shell，skill 型跑步骤

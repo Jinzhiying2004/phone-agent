@@ -3,6 +3,7 @@ package com.phoneagent.app;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.Context;
 import android.graphics.Color;
 import android.graphics.Rect;
 import android.net.Uri;
@@ -42,6 +43,9 @@ public class MainActivity extends Activity {
 
     private LinearLayout pageHome, pageRemote, pageAgent, pageTerm, pageMy;
     private Button tabHome, tabRemote, tabAgent, tabTerm, tabMy;
+    // v2.64：tabBar 和 content 改字段，供焦点监听控制显隐
+    private LinearLayout tabBarView;
+    private LinearLayout contentView;
 
     private TextView statusView, svcStatusView;
     private TextView adbStatusView, shizukuStatusView, wifiAdbStatusView;
@@ -88,6 +92,9 @@ public class MainActivity extends Activity {
     private Button agentSendBtn;
     private android.widget.CheckBox agentAdvBox;
     private android.widget.CheckBox agentSupervisorBox;
+    // v2.62：监管者独立输出区
+    private LinearLayout supervisorMsgBox;
+    private ScrollView supervisorScrollView;
     private ActionRisk.Policy riskPolicy;
     private android.widget.TextView riskSummaryView;
     private ChatStore chatStore;
@@ -114,7 +121,7 @@ public class MainActivity extends Activity {
     private android.widget.ProgressBar updProgress;
     // Telegram 机器人
     private TgStore tgStore;
-    private TgBot tgBot;
+    // v3.05：TgBot 已搬到 AgentService，MainActivity 不再持有
     private EditText tgToken;
     private TextView tgStatus, tgOwner, tgLogView;
     private android.widget.ScrollView tgScrollView;
@@ -301,15 +308,10 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void ensureTgBot() {
-        if (tgBot == null) {
-            tgBot = new TgBot(this, tgStore, llmStore, this::tgLog);
-        }
-    }
-
     private void refreshTg() {
         if (tgStatus == null) return;
-        boolean run = tgBot != null && tgBot.isRunning();
+        // v3.05：TG 在 Service 里跑，查 Service 状态
+        boolean run = AgentService.isTgRunning();
         tgStatus.setText(tgStore.hasToken()
                 ? (run ? "运行中 ✅" : "已配置，未启动")
                 : "未配置 Bot Token");
@@ -318,6 +320,40 @@ public class MainActivity extends Activity {
                 ? "主人已绑定 ✅" : "主人未绑定（给机器人发 /start）");
         if (tgStore.hasToken()) {
             tgToken.setHint("Bot Token（" + tgStore.getMaskedToken() + "，留空保留）");
+        }
+    }
+
+    // v3.08：任务完成后的日志入口按钮
+    private void showTaskLogButton(String logPath) {
+        try {
+            java.io.File f = new java.io.File(logPath);
+            String name = f.getName();
+            // 转成可读时间
+            String timeStr = name;
+            try {
+                // task_20261019_143022_ab12.log -> 2026-10-19 14:30:22
+                String dt = name.substring(5, 20);
+                timeStr = dt.substring(0, 4) + "-" + dt.substring(4, 6) + "-"
+                        + dt.substring(6, 8) + " " + dt.substring(9, 11) + ":"
+                        + dt.substring(11, 13) + ":" + dt.substring(13, 15);
+            } catch (Exception ignored) {
+            }
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.START);
+            row.setPadding(0, dp(4), 0, dp(4));
+            Button btn = new Button(this);
+            btn.setText("📝 任务日志 " + timeStr);
+            btn.setTextSize(12);
+            final java.io.File logFile = new java.io.File(logPath);
+            btn.setOnClickListener(v -> showTaskLogContent(logFile));
+            row.addView(btn);
+            agentMsgBox.addView(row);
+            if (agentScrollView != null) {
+                agentScrollView.post(() -> agentScrollView.fullScroll(
+                        android.view.View.FOCUS_DOWN));
+            }
+        } catch (Exception ignored) {
         }
     }
 
@@ -342,6 +378,24 @@ public class MainActivity extends Activity {
         });
     }
 
+    // v2.62：监管者独立输出（与智能体分开）
+    private void supervisorLog(String s) {
+        runOnUiThread(() -> {
+            if (supervisorMsgBox == null) return;
+            TextView tv = new TextView(this);
+            tv.setText(s);
+            tv.setTextSize(11);
+            tv.setTextColor(DyColor.onSurfaceVariant(this));
+            tv.setPadding(dp(8), dp(4), dp(8), dp(4));
+            tv.setTextIsSelectable(true);
+            supervisorMsgBox.addView(tv);
+            if (supervisorScrollView != null) {
+                supervisorScrollView.post(() -> supervisorScrollView.fullScroll(
+                        android.view.View.FOCUS_DOWN));
+            }
+        });
+    }
+
     private android.graphics.drawable.GradientDrawable bubbleBg(int color, float r) {
         android.graphics.drawable.GradientDrawable d =
                 new android.graphics.drawable.GradientDrawable();
@@ -351,6 +405,47 @@ public class MainActivity extends Activity {
     }
 
     /** 聊天气泡：isUser 右蓝左灰 */
+    // v3.02：流式气泡，返回 TextView 供追加 token
+    private TextView startStreamBubble() {
+        final TextView[] holder = new TextView[1];
+        runOnUiThread(() -> {
+            int maxW = (int) (getResources().getDisplayMetrics().widthPixels * 0.78);
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.START);
+            row.setPadding(0, dp(6), 0, dp(6));
+
+            LinearLayout bubble = new LinearLayout(this);
+            bubble.setOrientation(LinearLayout.VERTICAL);
+            bubble.setBackground(bubbleBg(DyColor.surfaceVariant(this), 18));
+            bubble.setPadding(dp(12), dp(8), dp(12), dp(6));
+
+            TextView msg = new TextView(this);
+            msg.setText("🤖 ");
+            msg.setTextSize(14);
+            msg.setTextColor(DyColor.onSurface(this));
+            msg.setTextIsSelectable(true);
+            msg.setMaxWidth(maxW);
+            msg.setLineSpacing(dp(2), 1f);
+            bubble.addView(msg);
+
+            row.addView(bubble);
+            agentMsgBox.addView(row);
+            if (agentScrollView != null) {
+                agentScrollView.post(() -> agentScrollView.fullScroll(
+                        android.view.View.FOCUS_DOWN));
+            }
+            holder[0] = msg;
+        });
+        // 等待 UI 线程创建完成（最多 1 秒）
+        long start = System.currentTimeMillis();
+        while (holder[0] == null
+                && System.currentTimeMillis() - start < 1000) {
+            try { Thread.sleep(10); } catch (InterruptedException ignored) {}
+        }
+        return holder[0];
+    }
+
     private void addChatBubble(String text, boolean isUser, String time) {
         int maxW = (int) (getResources().getDisplayMetrics().widthPixels * 0.78);
         LinearLayout row = new LinearLayout(this);
@@ -575,6 +670,143 @@ public class MainActivity extends Activity {
         }
     }
 
+    // v2.88：发送后输入框保持焦点，不用重新点
+    private void refocusInput() {
+        if (agentGoal == null) return;
+        agentGoal.post(() -> {
+            agentGoal.requestFocus();
+            try {
+                android.view.inputmethod.InputMethodManager imm =
+                        (android.view.inputmethod.InputMethodManager)
+                                getSystemService(Context.INPUT_METHOD_SERVICE);
+                imm.showSoftInput(agentGoal,
+                        android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
+    // v2.89：从服务商拉取模型列表（OpenAI 兼容 /v1/models）
+    private void fetchModels() {
+        String baseUrl = llmBaseUrl.getText().toString().trim();
+        String apiKey = llmApiKey.getText().toString().trim();
+        if (apiKey.isEmpty()) apiKey = llmStore.getApiKeyRaw();
+        if (baseUrl.isEmpty() || apiKey.isEmpty()) {
+            log("先填 base_url 和 api_key");
+            return;
+        }
+        // base_url 可能带 /v1 后缀，拼 /models 时处理
+        String url = baseUrl.endsWith("/") ? baseUrl + "models"
+                : baseUrl + "/models";
+        final String fUrl = url;
+        final String fKey = apiKey;
+        log("正在拉取模型列表...");
+        new Thread(() -> {
+            try {
+                java.net.URL u = new java.net.URL(fUrl);
+                java.net.HttpURLConnection c =
+                        (java.net.HttpURLConnection) u.openConnection();
+                c.setRequestMethod("GET");
+                c.setRequestProperty("Authorization", "Bearer " + fKey);
+                c.setConnectTimeout(15000);
+                c.setReadTimeout(15000);
+                int code = c.getResponseCode();
+                if (code != 200) {
+                    String msg = "HTTP " + code;
+                    try (java.io.InputStream es = c.getErrorStream()) {
+                        if (es != null) {
+                            byte[] buf = new byte[512];
+                            int n = es.read(buf);
+                            if (n > 0) msg += "：" + new String(buf, 0, n, "UTF-8");
+                        }
+                    } catch (Exception ignored) {}
+                    final String fMsg = msg;
+                    runOnUiThread(() -> log("拉取失败：" + fMsg));
+                    return;
+                }
+                StringBuilder sb = new StringBuilder();
+                try (java.io.BufferedReader br = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(c.getInputStream(), "UTF-8"))) {
+                    String line;
+                    while ((line = br.readLine()) != null) sb.append(line);
+                }
+                org.json.JSONObject jo = new org.json.JSONObject(sb.toString());
+                org.json.JSONArray data = jo.optJSONArray("data");
+                if (data == null || data.length() == 0) {
+                    runOnUiThread(() -> log("模型列表为空"));
+                    return;
+                }
+                java.util.List<String> ids = new java.util.ArrayList<>();
+                for (int i = 0; i < data.length(); i++) {
+                    String id = data.optJSONObject(i).optString("id", "");
+                    if (!id.isEmpty()) ids.add(id);
+                }
+                java.util.Collections.sort(ids);
+                final String[] items = ids.toArray(new String[0]);
+                runOnUiThread(() -> {
+                    new AlertDialog.Builder(this)
+                            .setTitle("选择模型（" + items.length + " 个）")
+                            .setItems(items, (d, which) -> {
+                                llmModel.setText(items[which]);
+                                log("已选模型：" + items[which]);
+                            })
+                            .setNegativeButton("取消", null)
+                            .show();
+                });
+            } catch (Exception e) {
+                final String msg = e.getMessage();
+                runOnUiThread(() -> log("拉取失败：" + msg));
+            }
+        }).start();
+    }
+
+    // v2.93：查看任务日志列表
+    private void showTaskLogs() {
+        java.io.File[] logs = TaskRunLogger.listLogs(this);
+        if (logs.length == 0) {
+            log("暂无任务日志");
+            return;
+        }
+        String[] names = new String[logs.length];
+        for (int i = 0; i < logs.length; i++) {
+            // task_20261019_141530_ab12.log → 2026-10-19 14:15:30
+            String n = logs[i].getName().replace("task_", "").replace(".log", "");
+            names[i] = n.length() >= 15
+                    ? n.substring(0, 4) + "-" + n.substring(4, 6) + "-" + n.substring(6, 8)
+                    + " " + n.substring(9, 11) + ":" + n.substring(11, 13) + ":" + n.substring(13, 15)
+                    : n;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("任务日志（" + logs.length + "）")
+                .setItems(names, (d, which) -> showTaskLogContent(logs[which]))
+                .setNegativeButton("关闭", null)
+                .show();
+    }
+
+    private void showTaskLogContent(java.io.File f) {
+        try {
+            StringBuilder sb = new StringBuilder();
+            try (java.io.BufferedReader br = new java.io.BufferedReader(
+                    new java.io.FileReader(f))) {
+                String line;
+                while ((line = br.readLine()) != null) sb.append(line).append("\n");
+            }
+            TextView tv = new TextView(this);
+            tv.setText(sb.toString());
+            tv.setTextSize(12);
+            tv.setPadding(dp(12), dp(12), dp(12), dp(12));
+            ScrollView sv = new ScrollView(this);
+            sv.addView(tv);
+            new AlertDialog.Builder(this)
+                    .setTitle(f.getName())
+                    .setView(sv)
+                    .setPositiveButton("关闭", null)
+                    .show();
+        } catch (Exception e) {
+            log("读取失败：" + e.getMessage());
+        }
+    }
+
     private void startAgent() {
         String goal = agentGoal.getText().toString().trim();
         if (goal.isEmpty()) {
@@ -602,10 +834,12 @@ public class MainActivity extends Activity {
             // 执行中发消息 = 指出问题，注入为实时反馈
             feedbackQueue.offer(goal);
             agentGoal.setText("");
+            refocusInput();
             agentLog("💬 已收到你的补充说明，思考执行员下一步会参考");
             return;
         }
         agentGoal.setText("");
+        refocusInput();
         // 高频意图本地路由：零 token 直达，不烧大模型
         LocalIntentRouter.RouteResult localRr = null;
         try {
@@ -619,6 +853,54 @@ public class MainActivity extends Activity {
                 runOnUiThread(this::refreshHistory);
                 return;
             }
+        }
+        // v2.82：纯聊天不走任务流，直接对话回复
+        // v3.02：真流式输出
+        if (LocalIntentRouter.isChat(goal)) {
+            agentGoal.setText("");
+            refocusInput();
+            final String chatGoal = goal;
+            agentLog("💬 " + chatGoal);
+            new Thread(() -> {
+                LlmClient llm = new LlmClient(llmStore.getBaseUrl(),
+                        llmStore.getApiKeyRaw(), llmStore.getModel());
+                String prompt = "你是手机Agent，一个友好、简洁的手机助手。用户说：" + chatGoal
+                        + "\n用一句话友好回应，如果用户没说具体要做什么，问他想让我干什么。不要输出JSON。";
+                final TextView tv = startStreamBubble();
+                final StringBuilder full = new StringBuilder();
+                LlmClient.Result r = llm.chatStream(prompt, token -> {
+                    full.append(token);
+                    if (tv != null) {
+                        final String t = token;
+                        runOnUiThread(() -> {
+                            tv.append(t);
+                            if (agentScrollView != null) {
+                                agentScrollView.post(() -> agentScrollView.fullScroll(
+                                        android.view.View.FOCUS_DOWN));
+                            }
+                        });
+                    }
+                });
+                if (!r.ok) {
+                    final String err = "出错了：" + r.text;
+                    runOnUiThread(() -> {
+                        if (tv != null) tv.setText("🤖 " + err);
+                        else agentLog("🤖 " + err);
+                    });
+                } else {
+                    // 存入历史
+                    final String reply = full.toString();
+                    runOnUiThread(() -> {
+                        if (chatStore != null) {
+                            String time = new java.text.SimpleDateFormat("HH:mm",
+                                    java.util.Locale.getDefault())
+                                    .format(new java.util.Date());
+                            chatStore.append("agent", reply, time);
+                        }
+                    });
+                }
+            }).start();
+            return;
         }
         // 不再自动新开对话：保留上下文，历史消息即上下文
         // 用户点"新对话"按钮才开新会话
@@ -716,7 +998,13 @@ public class MainActivity extends Activity {
                                 new AgentLoop.Listener() {
                                     @Override
                                     public void onLog(String msg) {
-                                        agentLog(msg);
+                                        // v2.62：监管者消息分流到独立输出区
+                                        if (msg.startsWith("🔍")
+                                                || msg.contains("监管者")) {
+                                            supervisorLog(msg);
+                                        } else {
+                                            agentLog(msg);
+                                        }
                                         // 悬浮窗流式显示思考与执行过程
                                         String line = null;
                                         if (msg.startsWith("🤔")) {
@@ -819,7 +1107,7 @@ public class MainActivity extends Activity {
                         if (finalDone) scheduleSkillCard(taskGoal, lastHistory);
                         break;
                     }
-                    agentLog("🔍 监管者复核中…");
+                    supervisorLog("🔍 监管者复核中…");
                     Supervisor.Verdict verdict = new Supervisor.Verdict();
                     try {
                         java.util.List<AgentAccessibilityService.NodeInfo> fNodes =
@@ -829,9 +1117,9 @@ public class MainActivity extends Activity {
                         verdict = Supervisor.review(agentClient(), taskGoal,
                                 finalDone, lastHistory, fScreen);
                     } catch (Exception e) {
-                        agentLog("🔍 监管者复核异常：" + e.getMessage());
+                        supervisorLog("🔍 监管者复核异常：" + e.getMessage());
                     }
-                    agentLog(Supervisor.conclude(finalDone, verdict));
+                    supervisorLog(Supervisor.conclude(finalDone, verdict));
                     if (verdict.ok) lastProgressPct = verdict.progressPct;
 
                     if (verdict.ok && verdict.completed) {
@@ -846,7 +1134,7 @@ public class MainActivity extends Activity {
                     }
                     // 未完成：先看是不是卡住了（同一问题连续两轮）
                     if (supRound > 0 && Supervisor.isStuck(lastMissing, verdict.missing)) {
-                        agentLog("🔍 监管者：连续两轮卡在同一问题（"
+                        supervisorLog("🔍 监管者：连续两轮卡在同一问题（"
                                 + verdict.missing + "），停手以免浪费 token，"
                                 + "建议人工查看");
                         confirmedDone = false;
@@ -854,7 +1142,7 @@ public class MainActivity extends Activity {
                     }
                     lastMissing = verdict.missing;
                     if (supRound >= MAX_SUP_ROUNDS) {
-                        agentLog("🔍 监管者：已达最大复核轮数，不再继续");
+                        supervisorLog("🔍 监管者：已达最大复核轮数，不再继续");
                         confirmedDone = false;
                         break;
                     }
@@ -879,6 +1167,12 @@ public class MainActivity extends Activity {
                                 ? " · 完成度" + lastProgressPct + "%" : "");
                 if (confirmedDone) {
                     agentLog("🎉 任务完成（监管者已确认）");
+                    // v3.08：任务完成给日志入口（用户在玩时点开看，不在时只存文件）
+                    final String logPath = loopRef[0] != null
+                            ? loopRef[0].getTaskLogPath() : null;
+                    if (logPath != null) {
+                        runOnUiThread(() -> showTaskLogButton(logPath));
+                    }
                     runOnUiThread(() -> android.widget.Toast.makeText(this,
                             "✅ 任务已完成", android.widget.Toast.LENGTH_LONG).show());
                     historyStore.finishTask(histId, taskGoal, true,
@@ -1227,7 +1521,15 @@ public class MainActivity extends Activity {
         llmModel.setHint("model，如 deepseek-chat");
         llmModel.setTextSize(13);
         llmModel.setSingleLine(true);
-        llmCard.addView(llmModel);
+        // v2.89：模型行加拉取按钮
+        LinearLayout modelRow = new LinearLayout(this);
+        modelRow.setOrientation(LinearLayout.HORIZONTAL);
+        modelRow.addView(llmModel, new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        Button bFetchModels = smallBtn("拉取");
+        bFetchModels.setOnClickListener(v -> fetchModels());
+        modelRow.addView(bFetchModels);
+        llmCard.addView(modelRow);
         llmVisionModel = new EditText(this);
         llmVisionModel.setHint("视觉模型（可空，如 glm-4v-flash，智能体看屏幕用）");
         llmVisionModel.setTextSize(13);
@@ -1502,25 +1804,10 @@ public class MainActivity extends Activity {
         page.addView(agentScrollView, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        // 高级动作开关
-        agentAdvBox = new android.widget.CheckBox(this);
-        agentAdvBox.setText("🔧 高级动作（shell / 文件读写 / 抓网页）");
-        agentAdvBox.setTextSize(12);
-        agentAdvBox.setTextColor(DyColor.onSurfaceVariant(this));
-        agentAdvBox.setChecked(
-                getSharedPreferences("agent", MODE_PRIVATE).getBoolean("adv", true));
-        agentAdvBox.setOnCheckedChangeListener((v, on) ->
-                getSharedPreferences("agent", MODE_PRIVATE).edit()
-                        .putBoolean("adv", on).apply());
-        agentAdvBox.setPadding(dp(4), 0, dp(4), dp(4));
-        page.addView(agentAdvBox);
-        agentSupervisorBox = new android.widget.CheckBox(this);
-        agentSupervisorBox.setText("🔍 监管者复核（任务结束后独立判定完成度）");
-        agentSupervisorBox.setTextSize(12);
-        agentSupervisorBox.setTextColor(DyColor.onSurfaceVariant(this));
-        agentSupervisorBox.setChecked(true);
-        agentSupervisorBox.setPadding(dp(4), 0, dp(4), dp(4));
-        page.addView(agentSupervisorBox);
+
+
+
+
 
         // 动作审批策略入口
         final TextView riskRow = new TextView(this);
@@ -1531,7 +1818,11 @@ public class MainActivity extends Activity {
         riskSummaryView = riskRow;
         Runnable refreshRiskRow = this::refreshRiskRow;
         riskRow.setOnClickListener(v -> showRiskDialog(refreshRiskRow));
-        page.addView(riskRow);
+        // v2.95：审批行+悬浮窗行装进可收纳容器
+        final LinearLayout riskFloatBox = new LinearLayout(this);
+        riskFloatBox.setOrientation(LinearLayout.VERTICAL);
+        riskFloatBox.addView(riskRow);
+        page.addView(riskFloatBox);
         refreshRiskRow.run();
 
         // 悬浮窗权限入口
@@ -1556,7 +1847,43 @@ public class MainActivity extends Activity {
                             + "可随时在系统设置中关闭。",
                     "去开启", () -> FloatWindow.requestPermission(this));
         });
-        page.addView(floatPermHint);
+        riskFloatBox.addView(floatPermHint);
+        // v2.97：流式输出开关
+        final TextView streamRow = new TextView(this);
+        streamRow.setTextSize(12);
+        streamRow.setPadding(dp(4), 0, dp(4), dp(8));
+        streamRow.setClickable(true);
+        streamRow.setFocusable(true);
+        final boolean[] streamOn = {getSharedPreferences("agent", MODE_PRIVATE)
+                .getBoolean("stream_output", true)};
+        Runnable refreshStream = () -> {
+            streamRow.setText(streamOn[0] ? "🌊 流式输出：已开启（点我关闭）"
+                    : "🌊 流式输出：已关闭（点我开启）");
+            streamRow.setTextColor(streamOn[0] ? DyColor.onSurfaceVariant(this)
+                    : DyColor.primary(this));
+        };
+        refreshStream.run();
+        streamRow.setOnClickListener(v -> {
+            streamOn[0] = !streamOn[0];
+            getSharedPreferences("agent", MODE_PRIVATE).edit()
+                    .putBoolean("stream_output", streamOn[0]).apply();
+            refreshStream.run();
+            log(streamOn[0] ? "🌊 流式输出已开启" : "🌊 流式输出已关闭");
+        });
+        riskFloatBox.addView(streamRow);
+        // v2.96：收纳按钮放进输入栏（下面加），和发送对称
+        // v2.97：改图标（功能多，不叫审批了）
+        final Button riskToggleBtn = new Button(this);
+        riskToggleBtn.setText("⚙️");
+        riskToggleBtn.setTextSize(16);
+        riskToggleBtn.setTextColor(android.graphics.Color.WHITE);
+        riskToggleBtn.setBackground(bubbleBg(DyColor.primary(this), 20));
+        riskToggleBtn.setPadding(dp(12), dp(10), dp(12), dp(10));
+        final boolean[] riskExpanded = {true};
+        riskToggleBtn.setOnClickListener(v -> {
+            riskExpanded[0] = !riskExpanded[0];
+            riskFloatBox.setVisibility(riskExpanded[0] ? View.VISIBLE : View.GONE);
+        });
         // 每次进智能体页刷新状态（onResume 里调）
         agentFloatHintRefresher = refreshFloatHint;
 
@@ -1581,9 +1908,12 @@ public class MainActivity extends Activity {
             }
             return false;
         });
+        // v2.83：删掉焦点监听，只认键盘显隐（防打架）
         LinearLayout.LayoutParams goalLp = new LinearLayout.LayoutParams(
                 0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
         goalLp.setMargins(dp(8), 0, dp(4), 0);
+        // v2.96：收纳按钮放输入栏最左，和发送对称
+        inputBar.addView(riskToggleBtn, 0);
         inputBar.addView(agentGoal, goalLp);
         agentSendBtn = new Button(this);
         agentSendBtn.setText("发送");
@@ -1606,7 +1936,8 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT);
-        barLp.setMargins(0, dp(8), 0, dp(8));
+        // v2.94：输入框底部留空，避开悬浮 tab（消息可滑到 tab 下，输入框不行）
+        barLp.setMargins(0, dp(8), 0, dp(84));
         page.addView(inputBar, barLp);
 
         // 恢复历史对话
@@ -1620,6 +1951,11 @@ public class MainActivity extends Activity {
                     if ("user".equals(m.role)) addChatBubble(m.text, true, m.time);
                     else if ("agent".equals(m.role)) addChatBubble(m.text, false, m.time);
                     else addChatSystem(m.text, m.time);
+                }
+                // v2.86：恢复历史后滚到底
+                if (agentScrollView != null) {
+                    agentScrollView.post(() -> agentScrollView.fullScroll(
+                            android.view.View.FOCUS_DOWN));
                 }
             }
         } finally {
@@ -2615,6 +2951,27 @@ public class MainActivity extends Activity {
         tgToken.setInputType(android.text.InputType.TYPE_CLASS_TEXT
                 | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
         tgCard.addView(tgToken);
+        // v2.99：TG 自启开关
+        LinearLayout tgAutoRow = new LinearLayout(this);
+        tgAutoRow.setOrientation(LinearLayout.HORIZONTAL);
+        tgAutoRow.setGravity(Gravity.CENTER_VERTICAL);
+        TextView tgAutoLabel = new TextView(this);
+        tgAutoLabel.setText("软件启动时自动开启机器人");
+        tgAutoLabel.setTextSize(13);
+        LinearLayout.LayoutParams tgAutoLp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        tgAutoRow.addView(tgAutoLabel, tgAutoLp);
+        android.widget.Switch tgAutoSw = new android.widget.Switch(this);
+        boolean tgAuto = getSharedPreferences("agent", MODE_PRIVATE)
+                .getBoolean("tg_autostart", true);
+        tgAutoSw.setChecked(tgAuto);
+        tgAutoSw.setOnCheckedChangeListener((v, on) -> {
+            getSharedPreferences("agent", MODE_PRIVATE).edit()
+                    .putBoolean("tg_autostart", on).apply();
+            log(on ? "已开启 TG 自启" : "已关闭 TG 自启");
+        });
+        tgAutoRow.addView(tgAutoSw);
+        tgCard.addView(tgAutoRow);
         LinearLayout tgBtns = new LinearLayout(this);
         tgBtns.setOrientation(LinearLayout.HORIZONTAL);
         Button bTgSave = smallBtn("保存");
@@ -2627,14 +2984,16 @@ public class MainActivity extends Activity {
         });
         Button bTgStart = smallBtn("启动");
         bTgStart.setOnClickListener(v -> {
-            ensureTgBot();
-            tgBot.start();
+            // v3.05：TG 在 Service 里跑
+            AgentService.startTgStatic(this);
             refreshTg();
+            log("🤖 TG 机器人已启动（后台运行）");
         });
         Button bTgStop = smallBtn("停止");
         bTgStop.setOnClickListener(v -> {
-            if (tgBot != null) tgBot.stop();
+            AgentService.stopTgStatic();
             refreshTg();
+            log("🤖 TG 机器人已停止");
         });
         tgBtns.addView(bTgSave);
         tgBtns.addView(bTgStart);
@@ -2650,9 +3009,22 @@ public class MainActivity extends Activity {
         tgCard.addView(tgOwner);
         Button bTgUnbind = smallBtn("解绑主人");
         bTgUnbind.setOnClickListener(v -> {
-            tgStore.unbindOwner();
-            refreshTg();
-            log("已解绑，下次 /start 重新绑定");
+            // v3.07：解绑加确认，防止误触
+            if (!tgStore.hasOwner()) {
+                log("本来就没绑定主人");
+                return;
+            }
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle("解绑主人？")
+                    .setMessage("解绑后机器人不再响应任何人，直到有人发 /start 重新绑定。")
+                    .setPositiveButton("解绑", (d, w) -> {
+                        long oldOwner = tgStore.getOwner();
+                        tgStore.unbindOwner();
+                        refreshTg();
+                        log("已解绑主人（" + oldOwner + "），下次 /start 重新绑定");
+                    })
+                    .setNegativeButton("取消", null)
+                    .show();
         });
         tgCard.addView(bTgUnbind);
         tgLogView = new TextView(this);
@@ -2725,8 +3097,6 @@ public class MainActivity extends Activity {
         TextView envHint = grayText("官方 Termux 用户空间，首次使用下载约 30MB（仅此刻联网），"
                 + "之后 pkg / python 均可直接用。");
         envCard.addView(envHint);
-        LinearLayout envBtns = new LinearLayout(this);
-        envBtns.setOrientation(LinearLayout.HORIZONTAL);
         termuxDownloadBtn = smallBtn("下载并安装");
         termuxDownloadBtn.setOnClickListener(v -> downloadBootstrap());
         Button remountBtn = smallBtn("重新挂载");
@@ -2776,13 +3146,20 @@ public class MainActivity extends Activity {
                 });
             }).start();
         });
-        envBtns.addView(termuxDownloadBtn);
-        envBtns.addView(remountBtn);
-        envBtns.addView(delBtn);
-        envBtns.addView(diagBtn);
-        envBtns.addView(fixBtn);
-        distributeRow(envBtns);
-        envCard.addView(envBtns);
+        // v2.68：按钮分两行，文字不再截断
+        LinearLayout envBtns1 = new LinearLayout(this);
+        envBtns1.setOrientation(LinearLayout.HORIZONTAL);
+        envBtns1.addView(termuxDownloadBtn);
+        envBtns1.addView(remountBtn);
+        envBtns1.addView(delBtn);
+        distributeRow(envBtns1);
+        LinearLayout envBtns2 = new LinearLayout(this);
+        envBtns2.setOrientation(LinearLayout.HORIZONTAL);
+        envBtns2.addView(diagBtn);
+        envBtns2.addView(fixBtn);
+        distributeRow(envBtns2);
+        envCard.addView(envBtns1);
+        envCard.addView(envBtns2);
         inner.addView(envCard);
 
         // Termux 终端卡片：环境就绪后才显示输入区
@@ -3319,6 +3696,158 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    // v2.65：关于软件卡（含使用方法+更新日志，二级折叠）
+    private LinearLayout buildAboutSoftwareCard() {
+        LinearLayout swCard = card();
+        // 一级：关于软件
+        LinearLayout swHeader = new LinearLayout(this);
+        swHeader.setOrientation(LinearLayout.HORIZONTAL);
+        swHeader.setGravity(Gravity.CENTER_VERTICAL);
+        swHeader.setClickable(true);
+        swHeader.setFocusable(true);
+        swHeader.setPadding(dp(4), dp(8), dp(4), dp(8));
+        TextView swTitle = new TextView(this);
+        swTitle.setText("关于软件");
+        swTitle.setTextSize(18);
+        swTitle.setTypeface(swTitle.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        swTitle.setTextColor(DyColor.onSurface(this));
+        LinearLayout.LayoutParams swLp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        swHeader.addView(swTitle, swLp);
+        final TextView swArrow = new TextView(this);
+        swArrow.setTextSize(16);
+        swArrow.setTextColor(DyColor.onSurfaceVariant(this));
+        swHeader.addView(swArrow);
+        swCard.addView(swHeader);
+        LinearLayout swBody = new LinearLayout(this);
+        swBody.setOrientation(LinearLayout.VERTICAL);
+        swCard.addView(swBody);
+        final boolean[] swOpen = {false};
+        Runnable paintSw = () -> swArrow.setText(swOpen[0] ? "▾" : "▸");
+        swHeader.setOnClickListener(v -> {
+            swOpen[0] = !swOpen[0];
+            swBody.setVisibility(swOpen[0] ? View.VISIBLE : View.GONE);
+            paintSw.run();
+        });
+        swBody.setVisibility(View.GONE);
+        paintSw.run();
+
+        // 二级：使用方法（可折叠）
+        LinearLayout useHeader = new LinearLayout(this);
+        useHeader.setOrientation(LinearLayout.HORIZONTAL);
+        useHeader.setGravity(Gravity.CENTER_VERTICAL);
+        useHeader.setClickable(true);
+        useHeader.setFocusable(true);
+        useHeader.setPadding(dp(4), dp(6), dp(4), dp(6));
+        TextView useTitle = new TextView(this);
+        useTitle.setText("使用方法");
+        useTitle.setTextSize(15);
+        useTitle.setTypeface(useTitle.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        useTitle.setTextColor(DyColor.onSurface(this));
+        LinearLayout.LayoutParams useLp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        useHeader.addView(useTitle, useLp);
+        final TextView useArrow = new TextView(this);
+        useArrow.setTextSize(14);
+        useArrow.setTextColor(DyColor.onSurfaceVariant(this));
+        useHeader.addView(useArrow);
+        swBody.addView(useHeader);
+        TextView useBody = new TextView(this);
+        useBody.setText("【智能体】在思考执行员页输入目标，AI 自动规划并执行，"
+                + "监管者会在任务结束后独立复核完成度。\n\n"
+                + "【技能卡】常用任务可存为技能卡，一键运行，"
+                + "支持可选步骤（失败自动跳过）。\n\n"
+                + "【远控】手机开 Tailscale + 远控服务，云端 Muse "
+                + "可远程操控（端口 28789，token 鉴权）。\n\n"
+                + "【虚拟屏】需要 root，任务在虚拟屏后台跑，"
+                + "不打扰手机正常使用（vd_create 等 7 个动作）。\n\n"
+                + "【返回键】非主页按返回先回主页，主页双击退出。");
+        useBody.setTextSize(13);
+        useBody.setTextColor(TEXT_DARK);
+        useBody.setLineSpacing(dp(4), 1f);
+        useBody.setPadding(dp(8), dp(4), dp(8), dp(8));
+        useBody.setTextIsSelectable(true);
+        swBody.addView(useBody);
+        final boolean[] useOpen = {false};
+        Runnable paintUse = () -> useArrow.setText(useOpen[0] ? "▾" : "▸");
+        useHeader.setOnClickListener(v -> {
+            useOpen[0] = !useOpen[0];
+            useBody.setVisibility(useOpen[0] ? View.VISIBLE : View.GONE);
+            paintUse.run();
+        });
+        useBody.setVisibility(View.GONE);
+        paintUse.run();
+
+        // 二级：更新日志（可折叠）
+        LinearLayout logHeader = new LinearLayout(this);
+        logHeader.setOrientation(LinearLayout.HORIZONTAL);
+        logHeader.setGravity(Gravity.CENTER_VERTICAL);
+        logHeader.setClickable(true);
+        logHeader.setFocusable(true);
+        logHeader.setPadding(dp(4), dp(6), dp(4), dp(6));
+        TextView logTitle2 = new TextView(this);
+        logTitle2.setText("更新日志");
+        logTitle2.setTextSize(15);
+        logTitle2.setTypeface(logTitle2.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        logTitle2.setTextColor(DyColor.onSurface(this));
+        LinearLayout.LayoutParams logLp2 = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        logHeader.addView(logTitle2, logLp2);
+        final TextView logArrow2 = new TextView(this);
+        logArrow2.setTextSize(14);
+        logArrow2.setTextColor(DyColor.onSurfaceVariant(this));
+        logHeader.addView(logArrow2);
+        swBody.addView(logHeader);
+        LinearLayout logBody2 = new LinearLayout(this);
+        logBody2.setOrientation(LinearLayout.VERTICAL);
+        TextView hint2 = grayText("点击版本号展开详情");
+        logBody2.addView(hint2);
+        LinearLayout logList2 = new LinearLayout(this);
+        logList2.setOrientation(LinearLayout.VERTICAL);
+        logBody2.addView(logList2);
+        swBody.addView(logBody2);
+        final boolean[] logOpen2 = {false};
+        Runnable paintLog2 = () -> logArrow2.setText(logOpen2[0] ? "▾" : "▸");
+        logHeader.setOnClickListener(v -> {
+            logOpen2[0] = !logOpen2[0];
+            logBody2.setVisibility(logOpen2[0] ? View.VISIBLE : View.GONE);
+            paintLog2.run();
+        });
+        logBody2.setVisibility(View.GONE);
+        paintLog2.run();
+        // 填充更新日志
+        for (int i = 0; i < AppInfo.LOG_VERSIONS.length; i++) {
+            final int idx = i;
+            final TextView detail = new TextView(this);
+            detail.setText(AppInfo.LOG_DETAILS[i]);
+            detail.setTextSize(13);
+            detail.setTextColor(TEXT_DARK);
+            detail.setLineSpacing(dp(3), 1f);
+            detail.setVisibility(i == 0 ? View.VISIBLE : View.GONE);
+            detail.setPadding(dp(8), dp(2), dp(8), dp(8));
+            final Button header = btn("");
+            header.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+            final Runnable paint = () -> {
+                boolean open = detail.getVisibility() == View.VISIBLE;
+                header.setText(AppInfo.LOG_VERSIONS[idx] + " · "
+                        + AppInfo.LOG_SUMMARY[idx] + (open ? "  ▾" : "  ▸"));
+            };
+            header.setOnClickListener(v -> {
+                detail.setVisibility(detail.getVisibility() == View.VISIBLE
+                        ? View.GONE : View.VISIBLE);
+                paint.run();
+            });
+            paint.run();
+            logList2.addView(header);
+            logList2.addView(detail);
+        }
+
+        return swCard;
+    }
+
     private LinearLayout buildMyPage() {
         LinearLayout inner = new LinearLayout(this);
         inner.setOrientation(LinearLayout.VERTICAL);
@@ -3408,21 +3937,150 @@ public class MainActivity extends Activity {
         updBtns.addView(updSrcBtn);
         distributeRow(updBtns);
         aboutBody.addView(updBtns);
-        // 更新日志收进关于更新
+        inner.addView(aboutCard);
+
+        // v2.65：关于软件（含使用方法+更新日志，二级折叠）
+        inner.addView(buildAboutSoftwareCard());
+
+        // v2.62：监管者独立输出区（可折叠，与智能体输出分开）
+        LinearLayout supCard = card();
+        LinearLayout supHeader = new LinearLayout(this);
+        supHeader.setOrientation(LinearLayout.HORIZONTAL);
+        supHeader.setGravity(Gravity.CENTER_VERTICAL);
+        supHeader.setClickable(true);
+        supHeader.setFocusable(true);
+        supHeader.setPadding(dp(4), dp(4), dp(4), dp(4));
+        TextView supTitle = new TextView(this);
+        supTitle.setText("🔍 监管者输出");
+        supTitle.setTextSize(13);
+        supTitle.setTypeface(supTitle.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        supTitle.setTextColor(DyColor.onSurface(this));
+        LinearLayout.LayoutParams supLp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        supHeader.addView(supTitle, supLp);
+        final TextView supArrow = new TextView(this);
+        supArrow.setTextSize(14);
+        supArrow.setTextColor(DyColor.onSurfaceVariant(this));
+        supHeader.addView(supArrow);
+        supCard.addView(supHeader);
+        supervisorScrollView = new ScrollView(this);
+        supervisorMsgBox = new LinearLayout(this);
+        supervisorMsgBox.setOrientation(LinearLayout.VERTICAL);
+        supervisorScrollView.addView(supervisorMsgBox,
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT));
+        // 限高 120dp，避免占太多空间
+        supervisorScrollView.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(120)));
+        supCard.addView(supervisorScrollView);
+        final boolean[] supOpen = {false};
+        Runnable paintSup = () -> supArrow.setText(supOpen[0] ? "▾" : "▸");
+        supHeader.setOnClickListener(v -> {
+            supOpen[0] = !supOpen[0];
+            supervisorScrollView.setVisibility(
+                    supOpen[0] ? View.VISIBLE : View.GONE);
+            paintSup.run();
+        });
+        supervisorScrollView.setVisibility(View.GONE);
+        paintSup.run();
+        inner.addView(supCard);
+
+        // v2.93：任务日志查看
+        LinearLayout logCard = card();
+        LinearLayout logHeader = new LinearLayout(this);
+        logHeader.setOrientation(LinearLayout.HORIZONTAL);
+        logHeader.setGravity(Gravity.CENTER_VERTICAL);
         TextView logTitle = new TextView(this);
-        logTitle.setText("更新日志");
+        logTitle.setText("📝 任务日志");
         logTitle.setTextSize(16);
         logTitle.setTypeface(logTitle.getTypeface(),
                 android.graphics.Typeface.BOLD);
-        logTitle.setTextColor(DyColor.onSurface(this));
-        logTitle.setPadding(0, dp(4), 0, dp(4));
-        aboutBody.addView(logTitle);
-        TextView hint = grayText("点击版本号展开详情");
-        aboutBody.addView(hint);
-        LinearLayout logList = new LinearLayout(this);
-        logList.setOrientation(LinearLayout.VERTICAL);
-        aboutBody.addView(logList);
-        inner.addView(aboutCard);
+        LinearLayout.LayoutParams logLp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        logHeader.addView(logTitle, logLp);
+        Button bViewLogs = smallBtn("查看");
+        bViewLogs.setOnClickListener(v -> showTaskLogs());
+        logHeader.addView(bViewLogs);
+        logCard.addView(logHeader);
+        inner.addView(logCard);
+
+
+        // v2.62：更多设置（可折叠）——监管者开关放这里，缩小
+        LinearLayout moreCard = card();
+        LinearLayout moreHeader = new LinearLayout(this);
+        moreHeader.setOrientation(LinearLayout.HORIZONTAL);
+        moreHeader.setGravity(Gravity.CENTER_VERTICAL);
+        moreHeader.setClickable(true);
+        moreHeader.setFocusable(true);
+        moreHeader.setPadding(dp(4), dp(4), dp(4), dp(4));
+        TextView moreTitle = new TextView(this);
+        moreTitle.setText("更多设置");
+        moreTitle.setTextSize(13);
+        moreTitle.setTypeface(moreTitle.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        moreTitle.setTextColor(DyColor.onSurface(this));
+        LinearLayout.LayoutParams moreLp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        moreHeader.addView(moreTitle, moreLp);
+        final TextView moreArrow = new TextView(this);
+        moreArrow.setTextSize(14);
+        moreArrow.setTextColor(DyColor.onSurfaceVariant(this));
+        moreHeader.addView(moreArrow);
+        moreCard.addView(moreHeader);
+        LinearLayout moreBody = new LinearLayout(this);
+        moreBody.setOrientation(LinearLayout.VERTICAL);
+        moreCard.addView(moreBody);
+        final boolean[] moreOpen = {false};
+        Runnable paintMore = () -> moreArrow.setText(moreOpen[0] ? "▾" : "▸");
+        moreHeader.setOnClickListener(v -> {
+            moreOpen[0] = !moreOpen[0];
+            moreBody.setVisibility(moreOpen[0] ? View.VISIBLE : View.GONE);
+            paintMore.run();
+        });
+        moreBody.setVisibility(View.GONE);
+        paintMore.run();
+        // v2.67：高级动作收纳到更多设置（缩小）
+        agentAdvBox = new android.widget.CheckBox(this);
+        agentAdvBox.setText("🔧 高级动作（shell / 文件读写 / 抓网页）");
+        agentAdvBox.setTextSize(10);
+        agentAdvBox.setTextColor(DyColor.onSurfaceVariant(this));
+        agentAdvBox.setChecked(
+                getSharedPreferences("agent", MODE_PRIVATE).getBoolean("adv", true));
+        agentAdvBox.setOnCheckedChangeListener((v, on) ->
+                getSharedPreferences("agent", MODE_PRIVATE).edit()
+                        .putBoolean("adv", on).apply());
+        agentAdvBox.setPadding(dp(4), 0, dp(4), dp(4));
+        moreBody.addView(agentAdvBox);
+        // 监管者开关：默认开启，可关闭，设置持久化
+        agentSupervisorBox = new android.widget.CheckBox(this);
+        agentSupervisorBox.setText("🔍 监管者复核（任务结束后独立判定完成度）");
+        agentSupervisorBox.setTextSize(10);
+        agentSupervisorBox.setTextColor(DyColor.onSurfaceVariant(this));
+        agentSupervisorBox.setChecked(
+                getSharedPreferences("agent", MODE_PRIVATE).getBoolean(
+                        "supervisor", true));
+        agentSupervisorBox.setOnCheckedChangeListener((v, on) ->
+                getSharedPreferences("agent", MODE_PRIVATE).edit()
+                        .putBoolean("supervisor", on).apply());
+        agentSupervisorBox.setPadding(dp(4), 0, dp(4), dp(4));
+        moreBody.addView(agentSupervisorBox);
+        // v2.79：启动自动开启远控服务开关
+        android.widget.CheckBox autoRemoteBox =
+                new android.widget.CheckBox(this);
+        autoRemoteBox.setText("🚀 启动自动开启远控服务");
+        autoRemoteBox.setTextSize(10);
+        autoRemoteBox.setTextColor(DyColor.onSurfaceVariant(this));
+        autoRemoteBox.setChecked(
+                getSharedPreferences("agent", MODE_PRIVATE).getBoolean(
+                        "auto_remote", true));
+        autoRemoteBox.setOnCheckedChangeListener((v, on) ->
+                getSharedPreferences("agent", MODE_PRIVATE).edit()
+                        .putBoolean("auto_remote", on).apply());
+        autoRemoteBox.setPadding(dp(4), 0, dp(4), dp(4));
+        moreBody.addView(autoRemoteBox);
+        inner.addView(moreCard);
 
         LinearLayout profileCard = card();
         LinearLayout profileHeader = new LinearLayout(this);
@@ -3480,32 +4138,6 @@ public class MainActivity extends Activity {
                 + "需要 root 挂载到标准路径；若装有官方 Termux App 则自动避让不覆盖。");
         useCard.addView(use);
         inner.addView(useCard);
-
-        for (int i = 0; i < AppInfo.LOG_VERSIONS.length; i++) {
-            final int idx = i;
-            final TextView detail = new TextView(this);
-            detail.setText(AppInfo.LOG_DETAILS[i]);
-            detail.setTextSize(13);
-            detail.setTextColor(TEXT_DARK);
-            detail.setLineSpacing(dp(3), 1f);
-            detail.setVisibility(i == 0 ? View.VISIBLE : View.GONE);
-            detail.setPadding(dp(8), dp(2), dp(8), dp(8));
-            final Button header = btn("");
-            header.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
-            final Runnable paint = () -> {
-                boolean open = detail.getVisibility() == View.VISIBLE;
-                header.setText(AppInfo.LOG_VERSIONS[idx] + " · "
-                        + AppInfo.LOG_SUMMARY[idx] + (open ? "  ▾" : "  ▸"));
-            };
-            header.setOnClickListener(v -> {
-                detail.setVisibility(detail.getVisibility() == View.VISIBLE
-                        ? View.GONE : View.VISIBLE);
-                paint.run();
-            });
-            paint.run();
-            logList.addView(header);
-            logList.addView(detail);
-        }
 
         ScrollView wrap = new ScrollView(this);
         wrap.addView(inner);
@@ -3612,6 +4244,85 @@ public class MainActivity extends Activity {
 
     // ---------- Tab 切换 ----------
 
+    // v2.64：tabBar 显隐（输入时自动隐藏）
+    // v2.83：加动画取消+状态防抖，防输入框和 tab 打架
+    private boolean tabBarHidden = false;
+
+    private void hideTabBar() {
+        if (tabBarHidden) return;
+        tabBarHidden = true;
+        if (tabBarView != null && tabBarView.getVisibility() == View.VISIBLE) {
+            tabBarView.animate().cancel();
+            tabBarView.animate().translationY(dp(80)).alpha(0f)
+                    .setDuration(200)
+                    .withEndAction(() -> tabBarView.setVisibility(View.GONE));
+            if (contentView != null) {
+                contentView.setPadding(0, 0, 0, 0);
+                contentView.requestLayout();
+            }
+        }
+    }
+
+    private void showTabBar() {
+        if (!tabBarHidden) return;
+        tabBarHidden = false;
+        if (tabBarView != null && tabBarView.getVisibility() != View.VISIBLE) {
+            tabBarView.animate().cancel();
+            tabBarView.setVisibility(View.VISIBLE);
+            tabBarView.animate().translationY(0).alpha(1f).setDuration(200);
+            // v2.92：内容可滑到 tab 下方，不留白
+            if (contentView != null) {
+                contentView.setPadding(0, 0, 0, 0);
+                contentView.requestLayout();
+            }
+        }
+    }
+
+    // v3.01：tab 显示防抖（键盘检测抖动导致莫名出现）
+    private Runnable pendingShowTab = null;
+
+    private void showTabBarDebounced() {
+        // 取消之前的待显示
+        if (pendingShowTab != null && tabBarView != null) {
+            tabBarView.removeCallbacks(pendingShowTab);
+        }
+        pendingShowTab = () -> {
+            // 延迟 300ms 后再次确认键盘真的收起了
+            View decor = getWindow().getDecorView();
+            android.graphics.Rect r = new android.graphics.Rect();
+            decor.getWindowVisibleDisplayFrame(r);
+            int screenH = decor.getRootView().getHeight();
+            int kbH = screenH - r.bottom;
+            if (kbH <= screenH * 0.15) {
+                showTabBar();
+            }
+        };
+        if (tabBarView != null) {
+            tabBarView.postDelayed(pendingShowTab, 300);
+        }
+    }
+
+    // v2.61：返回键层级——非主页先回主页，主页双击退出
+    private boolean backPressedOnce = false;
+
+    @Override
+    public void onBackPressed() {
+        int cur = getSharedPreferences("ui", MODE_PRIVATE).getInt("tab", 0);
+        if (cur != 0) {
+            showPage(0);
+            return;
+        }
+        if (backPressedOnce) {
+            super.onBackPressed();
+            return;
+        }
+        backPressedOnce = true;
+        android.widget.Toast.makeText(this, "再按一次退出",
+                android.widget.Toast.LENGTH_SHORT).show();
+        new android.os.Handler(android.os.Looper.getMainLooper())
+                .postDelayed(() -> backPressedOnce = false, 2000);
+    }
+
     private void showPage(int idx) {
         getSharedPreferences("ui", MODE_PRIVATE).edit().putInt("tab", idx).apply();
         String[] tabNames = {"主页", "远控", "智能体", "终端", "我的"};
@@ -3628,20 +4339,43 @@ public class MainActivity extends Activity {
         styleTab(tabAgent, idx == 2);
         styleTab(tabTerm, idx == 3);
         styleTab(tabMy, idx == 4);
+        // v2.86：切到智能体页时滚到底（别停在顶部看旧消息）
+        if (idx == 2 && agentScrollView != null) {
+            agentScrollView.post(() -> agentScrollView.fullScroll(
+                    android.view.View.FOCUS_DOWN));
+        }
     }
 
+    // v2.61：胶囊 tab 样式（Material 3 Expressive）
     private void styleTab(Button b, boolean selected) {
-        b.setBackgroundColor(selected ? DyColor.primary(this) : TAB_BG);
-        b.setTextColor(selected ? Color.WHITE : TEXT_DARK);
+        android.graphics.drawable.GradientDrawable d =
+                new android.graphics.drawable.GradientDrawable();
+        d.setShape(android.graphics.drawable.GradientDrawable.RECTANGLE);
+        d.setCornerRadius(dp(20));
+        if (selected) {
+            d.setColor(DyColor.primary(this));
+            b.setTextColor(Color.WHITE);
+        } else {
+            d.setColor(Color.TRANSPARENT);
+            b.setTextColor(TEXT_DARK);
+        }
+        b.setBackground(d);
     }
 
+    // v2.66：tab 用图标代替文字
     private Button makeTab(String s, int idx) {
         Button b = new Button(this);
         b.setText(s);
-        b.setTextSize(14);
+        b.setTextSize(22);
         b.setPadding(dp(4), dp(10), dp(4), dp(10));
+        // 去掉系统默认按钮背景
+        b.setBackground(null);
+        // 无障碍：读屏时报文字名
+        String[] names = {"主页", "远控", "思考执行员", "终端", "我的"};
+        if (idx >= 0 && idx < names.length) b.setContentDescription(names[idx]);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        lp.setMargins(dp(2), 0, dp(2), 0);
         b.setLayoutParams(lp);
         b.setOnClickListener(v -> showPage(idx));
         return b;
@@ -3799,9 +4533,27 @@ public class MainActivity extends Activity {
         tgStore = new TgStore(this);
         riskPolicy = new ActionRisk.Policy(this);
 
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
+        // v2.79：启动默认开启远控服务（可在更多设置关闭）
+        boolean autoRemote = getSharedPreferences("agent", MODE_PRIVATE)
+                .getBoolean("auto_remote", true);
+        if (autoRemote && !AgentService.isRunning()) {
+            Intent svcIt = new Intent(this, AgentService.class);
+            if (android.os.Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(svcIt);
+            } else {
+                startService(svcIt);
+            }
+        }
+
+        // v2.61：根布局改 FrameLayout，底部 tab 改悬浮胶囊样式
+        android.widget.FrameLayout root = new android.widget.FrameLayout(this);
         root.setBackgroundColor(0xFFF7F7F7);
+
+        LinearLayout content = new LinearLayout(this);
+        contentView = content;
+        content.setOrientation(LinearLayout.VERTICAL);
+        // v2.92：tab 悬浮，内容可滑到 tab 下方（tab 半透明）
+        content.setPadding(0, 0, 0, 0);
 
         LinearLayout appbar = new LinearLayout(this);
         appbar.setBackgroundColor(ACCENT);
@@ -3811,7 +4563,7 @@ public class MainActivity extends Activity {
         abTitle.setTextSize(20);
         abTitle.setPadding(dp(16), dp(12), dp(16), dp(12));
         appbar.addView(abTitle);
-        root.addView(appbar, new LinearLayout.LayoutParams(
+        content.addView(appbar, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT));
 
@@ -3825,40 +4577,60 @@ public class MainActivity extends Activity {
         pageAgent = buildAgentPage();
         pageTerm = buildTermPage();
         pageMy = buildMyPage();
-        root.addView(pageHome, new LinearLayout.LayoutParams(
+        content.addView(pageHome, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        root.addView(pageRemote, new LinearLayout.LayoutParams(
+        content.addView(pageRemote, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        root.addView(pageAgent, new LinearLayout.LayoutParams(
+        content.addView(pageAgent, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        root.addView(pageTerm, new LinearLayout.LayoutParams(
+        content.addView(pageTerm, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        root.addView(pageMy, new LinearLayout.LayoutParams(
+        content.addView(pageMy, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
+        // v2.61：悬浮胶囊 tabBar
+        root.addView(content, new android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT));
+
         LinearLayout tabBar = new LinearLayout(this);
+        tabBarView = tabBar;
         tabBar.setOrientation(LinearLayout.HORIZONTAL);
-        tabBar.setBackgroundColor(TAB_BG);
-        tabBar.setPadding(0, dp(8), 0, dp(8));
-        tabHome = makeTab("主页", 0);
-        tabRemote = makeTab("远控", 1);
-        tabAgent = makeTab("思考执行员", 2);
-        tabTerm = makeTab("终端", 3);
-        tabMy = makeTab("我的", 4);
+        tabBar.setPadding(dp(6), dp(6), dp(6), dp(6));
+        // 胶囊背景：圆角 + 阴影 + 半透明毛玻璃（v2.87）
+        android.graphics.drawable.GradientDrawable capsuleBg =
+                new android.graphics.drawable.GradientDrawable();
+        capsuleBg.setShape(android.graphics.drawable.GradientDrawable.RECTANGLE);
+        capsuleBg.setCornerRadius(dp(28));
+        capsuleBg.setColor(0xD9FFFFFF); // 85% 白，半透明
+        tabBar.setBackground(capsuleBg);
+        tabBar.setElevation(dp(8));
+        tabHome = makeTab("🏠", 0);
+        tabRemote = makeTab("📡", 1);
+        tabAgent = makeTab("🤖", 2);
+        tabTerm = makeTab("💻", 3);
+        tabMy = makeTab("👤", 4);
         tabBar.addView(tabHome);
         tabBar.addView(tabRemote);
         tabBar.addView(tabAgent);
         tabBar.addView(tabTerm);
         tabBar.addView(tabMy);
-        root.addView(tabBar, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT));
+        android.widget.FrameLayout.LayoutParams tabLp =
+                new android.widget.FrameLayout.LayoutParams(
+                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                        android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                        android.view.Gravity.BOTTOM | android.view.Gravity.CENTER_HORIZONTAL);
+        tabLp.setMargins(dp(16), 0, dp(16), dp(16));
+        root.addView(tabBar, tabLp);
 
         setContentView(root);
         int lastTab = getSharedPreferences("ui", MODE_PRIVATE).getInt("tab", 0);
         if (lastTab < 0 || lastTab > 4) lastTab = 0;
         showPage(lastTab);
         refreshAll();
+
+        // v3.05：TG 自启已移到 AgentService.onCreate，这里只刷新状态
+        refreshTg();
 
         // v2.50：无 root 不显示终端 tab（Termux 挂载需要 root；后台检测不卡 UI）
         new Thread(() -> {
@@ -3880,7 +4652,19 @@ public class MainActivity extends Activity {
                     decor.getWindowVisibleDisplayFrame(r);
                     int screenH = decor.getRootView().getHeight();
                     int kbH = screenH - r.bottom;
-                    if (kbH > screenH * 0.15
+                    boolean kbVisible = kbH > screenH * 0.15;
+                    // v2.83：只认键盘显隐（删掉焦点双保险，防打架）
+                    // v3.01：显示加防抖，防莫名出现
+                    if (kbVisible) {
+                        // 键盘弹起：取消待显示，立即隐藏
+                        if (pendingShowTab != null && tabBarView != null) {
+                            tabBarView.removeCallbacks(pendingShowTab);
+                        }
+                        hideTabBar();
+                    } else {
+                        showTabBarDebounced();
+                    }
+                    if (kbVisible
                             && pageTerm != null
                             && pageTerm.getVisibility() == View.VISIBLE
                             && termInputRow != null

@@ -1,13 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.phoneagent.app"
-    android:versionCode="81"
-    android:versionName="2.60">
+    android:versionCode="121"
+    android:versionName="3.09">
 
     <!-- INTERNET 仅用于首次下载官方 Termux 环境（约 30MB，一次性）；日常使用仍本地执行 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- v2.78：硬件控制 -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.FLASHLIGHT" />
     <!-- 刻意不申请其他网络相关能力；HTTP 控制服务仅监听本地 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />

@@ -40,6 +40,11 @@ public class TgBot {
     private final LlmStore llmStore;
     private final Listener listener;
     private volatile boolean running;
+    // v2.98：Telegram 任务级停止标志
+    private volatile boolean tgTaskStop = false;
+    private volatile boolean tgTaskRunning = false;
+    // v2.98：流式推送节流
+    private long tgLastPushMs = 0;
     private Thread thread;
     private long offset = 0;
 
@@ -78,13 +83,18 @@ public class TgBot {
 
     /** 长轮询主循环（跑在 bot 线程） */
     private void loop() {
+        int failStreak = 0;
         while (running) {
             try {
                 JSONObject resp = apiGet("getUpdates?offset=" + offset + "&timeout=30");
                 if (resp == null || !resp.optBoolean("ok")) {
+                    failStreak++;
+                    // v3.03：连续失败才打日志，偶发网络抖动不刷屏
+                    if (failStreak >= 3) log("轮询异常（连续" + failStreak + "次）");
                     sleepQuiet(3000);
                     continue;
                 }
+                failStreak = 0;
                 JSONArray result = resp.optJSONArray("result");
                 if (result == null) continue;
                 for (int i = 0; i < result.length(); i++) {
@@ -100,11 +110,13 @@ public class TgBot {
             } catch (RuntimeException e) {
                 if (e.getCause() instanceof InterruptedException) break;
                 if (!running) break;
-                log("轮询异常：" + e.getMessage());
+                failStreak++;
+                if (failStreak >= 3) log("轮询异常：" + e.getMessage() + "（连续" + failStreak + "次）");
                 sleepQuiet(5000);
             } catch (Exception e) {
                 if (!running) break;
-                log("轮询异常：" + e.getMessage());
+                failStreak++;
+                if (failStreak >= 3) log("轮询异常：" + e.getMessage() + "（连续" + failStreak + "次）");
                 sleepQuiet(5000);
             }
         }
@@ -141,6 +153,16 @@ public class TgBot {
             } else if (text.equals("/shot")) {
                 sendMessage(chatId, "截屏中…");
                 sendScreenshot(chatId);
+            } else if (text.equals("/stop")) {
+                // v2.98：强行打断正在跑的任务
+                if (!tgTaskRunning) {
+                    sendMessage(chatId, "没有正在执行的任务");
+                } else if (tgTaskStop) {
+                    sendMessage(chatId, "已在停止中…");
+                } else {
+                    tgTaskStop = true;
+                    sendMessage(chatId, "🛑 已请求停止，正在打断…");
+                }
             } else if (text.startsWith("/task")) {
                 runTaskCmd(chatId, text.substring(5).trim());
             } else if (text.startsWith("/agent")) {
@@ -157,6 +179,7 @@ public class TgBot {
         return "📱 手机 Agent 指令\n\n"
                 + "/status —— 服务状态\n"
                 + "/shot —— 当前截屏\n"
+                + "/stop —— 强行打断当前任务\n"
                 + "/task {\"steps\":[...]} —— 执行任务 JSON\n"
                 + "/agent 打开微信 —— AI 看屏自动操控\n"
                 + "直接发文字 = /agent\n\n"
@@ -204,6 +227,39 @@ public class TgBot {
             sendMessage(chatId, "用法：/agent 打开时钟设个 7 点的闹钟");
             return;
         }
+        // v3.00：闲聊分流（和 App 内一致）
+        // v3.04：TG 流式恢复（LlmClient null bug 已修）
+        // v3.06：加 typing 指示器
+        if (LocalIntentRouter.isChat(goal)) {
+            sendTyping(chatId);
+            String prompt = "你是手机Agent，一个友好、简洁的手机助手。用户说：" + goal
+                    + "\n用一句话友好回应，如果用户没说具体要做什么，问他想让我干什么。不要输出JSON。";
+            final long msgId = sendMessageReturnId(chatId, "🤖 …");
+            final StringBuilder full = new StringBuilder("🤖 ");
+            final long[] lastEdit = {0};
+            final long[] lastTyping = {0};
+            LlmClient.Result r = llmStore.client().chatStream(prompt, token -> {
+                full.append(token);
+                long now = System.currentTimeMillis();
+                // typing 指示器每 4 秒刷一次（TG 5 秒过期）
+                if (now - lastTyping[0] > 4000) {
+                    lastTyping[0] = now;
+                    sendTyping(chatId);
+                }
+                // 1.5 秒节流编辑，防 TG 限流
+                if (now - lastEdit[0] > 1500) {
+                    lastEdit[0] = now;
+                    editMessage(chatId, msgId, full.toString());
+                }
+            });
+            // 最终确保完整
+            if (r.ok) {
+                editMessage(chatId, msgId, full.toString());
+            } else {
+                editMessage(chatId, msgId, "出错了：" + r.text);
+            }
+            return;
+        }
         // 高频意图先走本地路由（零 token）
         try {
             LocalIntentRouter.RouteResult rr =
@@ -223,6 +279,11 @@ public class TgBot {
             return;
         }
         sendMessage(chatId, "🎯 收到：" + goal + "\n开始执行（最多 12 步）…");
+        // v3.06：任务执行时也显示 typing
+        sendTyping(chatId);
+        // v2.98：重置停止标志，标记任务运行中
+        tgTaskStop = false;
+        tgTaskRunning = true;
         StringBuilder logs = new StringBuilder();
         AgentLoop loop = new AgentLoop(ctx, llmStore.client(),
                 new AgentLoop.Listener() {
@@ -230,11 +291,20 @@ public class TgBot {
                     public void onLog(String msg) {
                         logs.append(msg).append("\n");
                         log("[agent] " + msg);
+                        // v2.98：实时流式推送（节流 2 秒，只推关键信息）
+                        if (shouldStream(msg)) {
+                            long now = System.currentTimeMillis();
+                            if (now - tgLastPushMs > 2000) {
+                                tgLastPushMs = now;
+                                sendMessage(chatId, msg);
+                            }
+                        }
                     }
 
                     @Override
                     public boolean isStopped() {
-                        return !running;
+                        // v2.98：支持 /stop 强行打断
+                        return !running || tgTaskStop;
                     }
                 });
         // 远程（Telegram）进来：高风险动作无审批人时默认拦截，不自动放行
@@ -249,10 +319,21 @@ public class TgBot {
             done = loop.run(goal, 12);
         } catch (Exception e) {
             sendMessage(chatId, "执行异常：" + e.getMessage());
+            tgTaskRunning = false;
             return;
+        } finally {
+            tgTaskRunning = false;
         }
-        sendMessage(chatId, (done ? "🎉 任务完成\n\n" : "⏹ 任务结束（未完成）\n\n")
-                + trimLog(logs.toString()));
+        String stopNote = tgTaskStop ? "（被 /stop 打断）\n\n" : "\n\n";
+        sendMessage(chatId, (done ? "🎉 任务完成" : "⏹ 任务结束（未完成）")
+                + stopNote + trimLog(logs.toString()));
+    }
+
+    // v2.98：判断哪些消息值得实时推送（关键节点，不刷屏）
+    private boolean shouldStream(String msg) {
+        return msg.startsWith("💭") || msg.startsWith("📍")
+                || msg.startsWith("🔍") || msg.startsWith("🤖")
+                || msg.startsWith("✅") || msg.startsWith("❌");
     }
 
     /** /shot：截屏发照片 */
@@ -296,9 +377,15 @@ public class TgBot {
     }
 
     private void sendMessage(long chatId, String text) {
-        if (text == null || text.isEmpty()) return;
+        sendMessageReturnId(chatId, text);
+    }
+
+    /** v3.02：发送并返回 message_id（用于流式编辑） */
+    private long sendMessageReturnId(long chatId, String text) {
+        if (text == null || text.isEmpty()) return 0;
+        long msgId = 0;
         try {
-            // 超长分段
+            // 超长分段（只返回第一段的 id）
             for (int i = 0; i < text.length(); i += MSG_LIMIT) {
                 String part = text.substring(i, Math.min(i + MSG_LIMIT, text.length()));
                 String params = "chat_id=" + chatId
@@ -315,11 +402,68 @@ public class TgBot {
                     os.write(params.getBytes(StandardCharsets.UTF_8));
                 }
                 int code = c.getResponseCode();
-                readAll(c, code);
-                if (code != 200) log("发送消息失败 HTTP " + code);
+                String resp = readAll(c, code);
+                if (code != 200) {
+                    log("发送消息失败 HTTP " + code);
+                } else if (msgId == 0) {
+                    try {
+                        org.json.JSONObject o = new org.json.JSONObject(resp);
+                        msgId = o.optJSONObject("result").optLong("message_id", 0);
+                    } catch (Exception ignored) {}
+                }
             }
         } catch (Exception e) {
             log("发送消息异常：" + e.getMessage());
+        }
+        return msgId;
+    }
+
+    /** v3.06：发送 typing 指示器（原生流式体验） */
+    private void sendTyping(long chatId) {
+        try {
+            String params = "chat_id=" + chatId + "&action=typing";
+            URL url = new URL(API + store.getToken() + "/sendChatAction");
+            HttpURLConnection c = (HttpURLConnection) url.openConnection();
+            c.setRequestMethod("POST");
+            c.setDoOutput(true);
+            c.setConnectTimeout(10000);
+            c.setReadTimeout(10000);
+            c.setRequestProperty("Content-Type",
+                    "application/x-www-form-urlencoded");
+            try (OutputStream os = c.getOutputStream()) {
+                os.write(params.getBytes(StandardCharsets.UTF_8));
+            }
+            readAll(c, c.getResponseCode());
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** v3.02：编辑消息（流式更新用） */
+    private void editMessage(long chatId, long msgId, String text) {
+        if (msgId == 0 || text == null) return;
+        try {
+            String params = "chat_id=" + chatId
+                    + "&message_id=" + msgId
+                    + "&text=" + URLEncoder.encode(
+                            text.length() > MSG_LIMIT
+                                    ? text.substring(0, MSG_LIMIT) : text,
+                            "UTF-8");
+            URL url = new URL(API + store.getToken() + "/editMessageText");
+            HttpURLConnection c = (HttpURLConnection) url.openConnection();
+            c.setRequestMethod("POST");
+            c.setDoOutput(true);
+            c.setConnectTimeout(15000);
+            c.setReadTimeout(30000);
+            c.setRequestProperty("Content-Type",
+                    "application/x-www-form-urlencoded");
+            try (OutputStream os = c.getOutputStream()) {
+                os.write(params.getBytes(StandardCharsets.UTF_8));
+            }
+            int code = c.getResponseCode();
+            readAll(c, code);
+            // 429 或内容未变都静默忽略（节流已做）
+        } catch (Exception e) {
+            log("编辑消息异常：" + e.getMessage());
         }
     }
 
