@@ -72,3 +72,129 @@ CRITICAL（破坏性）。远控/TG 进来的高风险动作无审批人时默�
     → TaskRunLogger 记录
   → answer 返回用户
 ```
+
+## 任务执行流程（详细）
+
+### 阶段一：意图识别
+
+```
+用户输入 "打开微信发消息给张三说你好"
+  │
+  ├─ LocalIntentRouter.tryRoute()
+  │   ├─ 高频本地意图？（打开应用、打电话、发短信等）
+  │   │   └─ 是 → 零 token 直接执行，返回
+  │   └─ 否 → 继续
+  │
+  ├─ LocalIntentRouter.isChat()
+  │   ├─ 纯聊天？（你好、谢谢、你是谁…）
+  │   │   └─ 是 → LlmClient.chat() 轻量回复，不进任务流
+  │   └─ 否 → 进入 AgentLoop
+```
+
+### 阶段二：任务规划与执行（AgentLoop.run）
+
+```
+maxSteps = 12（默认）
+for step in 1..maxSteps:
+  │
+  ├─ 1. 感知
+  │   ├─ 截屏（ScreenshotUtil：无障碍→root screencap 两级）
+  │   ├─ 压缩到 720p JPEG（省 token）
+  │   └─ 控件树（AccessibilityNodeInfo 剪枝）
+  │
+  ├─ 2. 决策
+  │   ├─ buildPrompt()：拼装完整 prompt
+  │   │   ├─ 截图（Vision，原生多模态）
+  │   │   ├─ 用户目标 + 对话上下文
+  │   │   ├─ 用户记忆（UserMemory）
+  │   │   ├─ 技能卡（关键词匹配注入）
+  │   │   ├─ 动作列表文档
+  │   │   └─ 3 条原则 + 5 条规则
+  │   ├─ LlmClient.chatVision() → JSON
+  │   └─ 解析：{think, state, actions[], done, answer}
+  │
+  ├─ 3. 执行
+  │   └─ TaskRunner：逐个执行 actions[]
+  │       ├─ 有 root？→ input 命令优先
+  │       └─ 无 root → 无障碍手势
+  │
+  ├─ 4. 监管
+  │   └─ Supervisor.monitor()（每 N 步）
+  │       ├─ 卡住/跑偏？→ 打断 + reason（哪步错在哪）
+  │       └─ 正常 → 继续
+  │
+  ├─ 5. 记录
+  │   └─ TaskRunLogger：步骤/思考/截图/监管 → task_*.log
+  │
+  └─ 6. 终止检查
+      ├─ done=true → 返回 answer，结束
+      ├─ 用户停止？→ 结束
+      └─ 步数用完 → 结束（未完成）
+```
+
+### 阶段三：动作执行（TaskRunner）
+
+```
+action = {do: "tap_text", text: "微信"}
+  │
+  ├─ 风险评估（ActionRisk）
+  │   ├─ LOW → 直接执行
+  │   ├─ MEDIUM → 直接执行（记录）
+  │   ├─ HIGH → 问用户（App 弹窗 / 远控拦截）
+  │   └─ CRITICAL → 问用户（App 弹窗 / 远控拦截）
+  │
+  ├─ 执行通道选择
+  │   ├─ tap/swipe/back：有 root？→ `input tap x y` ：无障碍手势
+  │   ├─ tap_text：找节点 → 有 root？→ input : 无障碍点击
+  │   ├─ launch：am start（root 可指定 --display 虚拟屏）
+  │   ├─ shell：root shell 直接跑
+  │   ├─ vision：截屏 → 问视觉模型拿坐标 → tap
+  │   └─ vd_*：虚拟屏专用（创建/启动/点击/截图/销毁）
+  │
+  └─ 结果回传 → AgentLoop 继续下一步
+```
+
+## 实现路径（关键功能）
+
+### 虚拟屏后台自动化（v2.60）
+```
+vd_create → VirtualDisplayManager.create()
+  → DisplayManager.createVirtualDisplay(720x1280, VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY)
+  → ImageReader 截屏通道
+
+vd_launch → root 执行 am start --display <id> <package>
+vd_tap → VdInput.dex（app_process 注入）→ InputManager.injectInputEvent
+vd_screenshot → ImageReader.acquireLatestImage() → 存 App cache
+vd_destroy → Display.release()
+```
+系统相机不画到虚拟屏（MIUI 限制），普通 App 可用。
+
+### 真流式输出（v3.02）
+```
+LlmClient.chatStream(prompt, callback)
+  → POST /v1/chat/completions {stream: true}
+  → 逐行读 SSE：data: {"choices":[{"delta":{"content":"..."}}]}
+  → 每 token 调 callback.onToken(token)
+  → App 内：TextView.append() 打字机效果
+  → TG：editMessageText 1.5s 节流更新 + sendChatAction typing
+注意：org.json 的 optString 对 JSON null 返回字符串"null"，必须 isNull 过滤（v3.04 修）
+```
+
+### 热补丁（v2.44）
+```
+Nuwa 式 dexElements 前插：
+  → PatchManager 校验（appCode + sha256）
+  → DexInjector：反射修改 PathClassLoader 的 dexElements
+  → 新 dex 插到数组前面，类加载优先命中补丁
+  → /patch 接口接收补丁，重启 App 生效
+```
+
+### Telegram 通道（v2.98-v3.06）
+```
+TgBot（跑在 AgentService 前台服务里）
+  → getUpdates 长轮询（30s timeout）
+  → /start 绑定主人（chatId 存 SharedPreferences）
+  → 消息 → isChat？→ 轻量回复 ：AgentLoop 任务
+  → 流式：editMessageText + typing 指示器
+  → /stop → tgTaskStop=true → AgentLoop.isStopped() 中断
+```
