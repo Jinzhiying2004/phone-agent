@@ -26,6 +26,7 @@ public class FlowLightDrawable extends Drawable {
     private final int lightColor;
     private final Paint basePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint flowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint haloPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path borderPath = new Path();
     private final PathMeasure pathMeasure = new PathMeasure();
     private final Path segmentPath = new Path();
@@ -41,13 +42,15 @@ public class FlowLightDrawable extends Drawable {
         basePaint.setStyle(Paint.Style.FILL);
         flowPaint.setStyle(Paint.Style.STROKE);
         flowPaint.setStrokeCap(Paint.Cap.ROUND);
+        haloPaint.setStyle(Paint.Style.STROKE);
+        haloPaint.setStrokeCap(Paint.Cap.ROUND);
     }
 
     /** 开始流光动画 */
     public void start() {
         if (animator != null && animator.isRunning()) return;
         animator = ValueAnimator.ofFloat(0f, 1f);
-        animator.setDuration(1800);
+        animator.setDuration(4200); // v3.41：放慢（用户反馈太快）
         animator.setRepeatCount(ValueAnimator.INFINITE);
         animator.setInterpolator(new LinearInterpolator());
         animator.addUpdateListener(a -> {
@@ -101,7 +104,7 @@ public class FlowLightDrawable extends Drawable {
 
         // 取光带段：头部在 fraction 处，尾部拖 18% 周长
         float head = len * fraction;
-        float tailLen = len * 0.18f;
+        float tailLen = len * 0.22f; // v3.41：光带拉长更醒目
         float tail = head - tailLen;
         segmentPath.reset();
         if (tail >= 0) {
@@ -123,7 +126,20 @@ public class FlowLightDrawable extends Drawable {
                 new float[]{0f, 0.6f, 1f},
                 Shader.TileMode.CLAMP);
         flowPaint.setShader(grad);
-        flowPaint.setStrokeWidth(Math.max(5, b.width() / 70f));
+        // v3.41：加粗 + 外层光晕（亮背景上也看得清）
+        float coreW = Math.max(7, b.width() / 50f);
+        LinearGradient haloGrad = new LinearGradient(
+                tailPos[0], tailPos[1], pos[0], pos[1],
+                new int[]{Color.TRANSPARENT,
+                        Color.argb(80, Color.red(lightColor),
+                                Color.green(lightColor), Color.blue(lightColor)),
+                        Color.argb(120, 255, 255, 255)},
+                new float[]{0f, 0.6f, 1f},
+                Shader.TileMode.CLAMP);
+        haloPaint.setShader(haloGrad);
+        haloPaint.setStrokeWidth(coreW * 2.6f);
+        canvas.drawPath(segmentPath, haloPaint);
+        flowPaint.setStrokeWidth(coreW);
         canvas.drawPath(segmentPath, flowPaint);
     }
 
