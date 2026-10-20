@@ -4,6 +4,15 @@ out/
 *.idsig
 *.ap_
 
+# 编译中间件（javac/d8 产物，可重编；推送管线不支持二进制）
+*.class
+*.dex
+*.pyc
+__pycache__/
+
+# 调试签名（build.sh 缺失时会自动生成）
+debug.keystore
+
 # 调试签名（build.sh 缺失时会自动生成）
 debug.keystore
 
