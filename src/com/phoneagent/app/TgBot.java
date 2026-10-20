@@ -45,6 +45,7 @@ public class TgBot {
     private volatile boolean tgTaskRunning = false;
     // v2.98：流式推送节流
     private long tgLastPushMs = 0;
+    // v3.38：TG 最近对话（给 agent 补上下文，帮它理解指代与真实意图）
     private Thread thread;
     private long offset = 0;
 
@@ -150,8 +151,26 @@ public class TgBot {
                 sendMessage(chatId, helpText());
             } else if (text.equals("/status")) {
                 sendMessage(chatId, statusText());
+            } else if (text.equals("/new") || text.startsWith("/new ")) {
+                // v3.22：真 /new——新开一个没有上下文的对话（清会话，清 TG 侧待处理状态；长期记忆不动）
+                // v3.43：/new 后可直接跟指令（旧版只认整句等于 /new，跟了文字整句漏进任务目标）
+                try {
+                    new ChatStore(ctx).newSession();
+                    SharedMemory.clear(ctx);
+                } catch (Exception ignored) {
+                }
+                String rest = text.length() > 4 ? text.substring(4).trim() : "";
+                if (rest.isEmpty()) {
+                    sendMessage(chatId, "🆕 新对话开始了，之前的上下文已清空。想让我做什么？");
+                } else {
+                    sendMessage(chatId, "🆕 新对话开始了，上下文已清空。");
+                    runAgentCmd(chatId, rest);
+                }
             } else if (text.equals("/shot")) {
                 sendMessage(chatId, "截屏中…");
+                sendScreenshot(chatId);
+            } else if (isScreenshotAsk(text)) {
+                // v3.22-hotfix：自然语言截图直达（"截图"/"截屏"/"当前界面截图给我"等），不进 AgentLoop，不卡无障碍检查
                 sendScreenshot(chatId);
             } else if (text.equals("/stop")) {
                 // v2.98：强行打断正在跑的任务
@@ -178,6 +197,7 @@ public class TgBot {
     private String helpText() {
         return "📱 手机 Agent 指令\n\n"
                 + "/status —— 服务状态\n"
+                + "/new —— 新开对话（清上下文）\n"
                 + "/shot —— 当前截屏\n"
                 + "/stop —— 强行打断当前任务\n"
                 + "/task {\"steps\":[...]} —— 执行任务 JSON\n"
@@ -221,19 +241,68 @@ public class TgBot {
                 + trimLog(logs.toString()));
     }
 
+    // v3.43：像反馈/陈述的句子（「没打开」「登录退了」「完成了，不过…」）不是新指令，
+    // 原样当目标执行只会产出假完成。给 agent 加核实框架再执行。
+    private static final java.util.regex.Pattern P_FEEDBACK =
+            java.util.regex.Pattern.compile(
+                    "没打开|没有打开|打不开|没反应|没成功|没完成|失败了|退了|掉线|"
+                    + "还是不行|怎么还没|完成了[，,、]?不过|已经完成了");
+
+    private String wrapFeedbackGoal(String goal) {
+        try {
+            if (goal != null && P_FEEDBACK.matcher(goal).find()) {
+                return "【系统提示】用户这句话像是对之前任务的反馈或状态陈述，"
+                        + "不一定是新的操作指令。原文：「" + goal + "」。"
+                        + "请先用 observe 核实当前实际状态，结合上文判断用户原本的意图；"
+                        + "确有问题就实际操作补救，情况与用户所说不同则以观察事实为准，"
+                        + "并在最终回复里如实说明。不要把这句话本身当成要执行的动作。";
+            }
+        } catch (Exception ignored) {
+        }
+        return goal;
+    }
+
     /** /agent：AI 看屏自动操控 */
     private void runAgentCmd(long chatId, String goal) {
         if (goal.isEmpty()) {
             sendMessage(chatId, "用法：/agent 打开时钟设个 7 点的闹钟");
             return;
         }
+        // v3.30：三端对齐 App——高频意图本地路由先行，闲聊分流放后
+        // （之前顺序反了："回桌面"被 isChat 误判进闲聊，TG 只聊天不执行）
+        // 高频意图先走本地路由（零 token）
+        try {
+            LocalIntentRouter.RouteResult rr =
+                    LocalIntentRouter.tryRoute(ctx, goal);
+            if (rr != null) {
+                sendMessage(chatId, (rr.handled ? "✅ " : "⚠️ ") + rr.message);
+                if (rr.handled) return;
+            } else {
+                try {
+                    org.json.JSONObject rd = new org.json.JSONObject();
+                    rd.put("goal", goal);
+                    Telemetry.event(ctx, "tg", "router_miss", rd);
+                } catch (Exception ignored2) {
+                }
+            }
+        } catch (Exception ignored) {
+        }
         // v3.00：闲聊分流（和 App 内一致）
         // v3.04：TG 流式恢复（LlmClient null bug 已修）
         // v3.06：加 typing 指示器
         if (LocalIntentRouter.isChat(goal)) {
+            try {
+                org.json.JSONObject cd = new org.json.JSONObject();
+                cd.put("text", goal);
+                Telemetry.event(ctx, "tg", "chat", cd);
+            } catch (Exception ignored) {
+            }
             sendTyping(chatId);
             String prompt = "你是手机Agent，一个友好、简洁的手机助手。用户说：" + goal
-                    + "\n用一句话友好回应，如果用户没说具体要做什么，问他想让我干什么。不要输出JSON。";
+                    + "\n用一句话友好回应，如果用户没说具体要做什么，问他想让我干什么。不要输出JSON。"
+ + "【重要】你现在是纯聊天模式、没有任何操作手机的工具，绝不能声称已经帮用户"
+                    + "打开/关闭/设置/发送/删除了任何东西；如果用户是在让你操作手机，"
+                    + "直接告诉他：把这条单独发给我，我按任务执行。";
             final long msgId = sendMessageReturnId(chatId, "🤖 …");
             final StringBuilder full = new StringBuilder("🤖 ");
             final long[] lastEdit = {0};
@@ -260,43 +329,82 @@ public class TgBot {
             }
             return;
         }
-        // 高频意图先走本地路由（零 token）
-        try {
-            LocalIntentRouter.RouteResult rr =
-                    LocalIntentRouter.tryRoute(ctx, goal);
-            if (rr != null) {
-                sendMessage(chatId, (rr.handled ? "✅ " : "⚠️ ") + rr.message);
-                if (rr.handled) return;
-            }
-        } catch (Exception ignored) {
-        }
         if (!llmStore.hasKey()) {
             sendMessage(chatId, "先在 App「大模型配置」里填好 API Key");
             return;
         }
-        if (!AgentAccessibilityService.isRunning()) {
-            sendMessage(chatId, "无障碍权限未开启，AI 看不见屏幕");
-            return;
+        // v3.22-hotfix：去掉一刀切的无障碍检查。无 root 且无障碍未开时 AgentLoop 内部会给出准确提示；
+        // 有 root 时截屏/点击都能走 root 通道，不再提前拒绝所有任务。
+        boolean noA11yNoRoot = !AgentAccessibilityService.isRunning()
+                && !AgentLoop.checkRootOnce();
+        if (noA11yNoRoot) {
+            sendMessage(chatId, "⚠️ 无障碍未开启且无 root，无法操控屏幕。截屏、开 App、音量等可用上方直达指令，或去 App 里开启无障碍。");
+            // 不直接 return：仍进 AgentLoop，让 prompt 里的能力段告诉模型真实情况，由它决定能做多少
         }
-        sendMessage(chatId, "🎯 收到：" + goal + "\n开始执行（最多 12 步）…");
+        // v3.43：意图门——反馈/陈述句不原样当目标，给 agent 加核实框架
+        final String execGoal = wrapFeedbackGoal(goal);
+        sendMessage(chatId, "🎯 收到：" + goal + "\n开始执行…");
         // v3.06：任务执行时也显示 typing
         sendTyping(chatId);
+        // v3.32：三通道真互斥——App/远控占用时不再并发抢屏
+        if (!TaskLock.tryAcquire("tg")) {
+            sendMessage(chatId, "⏳ 任务忙：" + TaskLock.current()
+                    + " 通道正在执行，请稍后再试");
+            return;
+        }
         // v2.98：重置停止标志，标记任务运行中
         tgTaskStop = false;
         tgTaskRunning = true;
+        // v3.32：任务移到工作线程——之前在轮询线程同步执行，
+        // 任务期间（最长 5 分钟）/stop 与任何消息都收不进来
+        new Thread(() -> runAgentTask(chatId, execGoal), "tg-agent").start();
+    }
+
+    // v3.36：TG 任务也要有悬浮窗提示（与远控同款）
+    private void floatShow(String text) {
+        // v3.39：走任务级登记（在 App 前台发起也不丢窗）
+        FloatWindow.beginTask(ctx, text);
+    }
+
+    private void floatEnd(String text) {
+        FloatWindow.endTask(text);
+    }
+
+    private void runAgentTask(long chatId, String goal) {
         StringBuilder logs = new StringBuilder();
+        // v3.37：过程直播——一条消息原地编辑，实时显示执行到哪一步
+        final long progressId = sendMessageReturnId(chatId,
+                "🎯 " + goal + "\n⏳ 开始执行…");
+        final long progStart = System.currentTimeMillis();
+        final int[] progSteps = {0};
+        final long[] progLastEdit = {0};
+        final String[] progLastText = {""};
+        // v3.44：一份共享记忆——上下文改读三端共用的持久化轮次
+        final String convCtx = SharedMemory.recentText(ctx, 3);
         AgentLoop loop = new AgentLoop(ctx, llmStore.client(),
                 new AgentLoop.Listener() {
                     @Override
                     public void onLog(String msg) {
                         logs.append(msg).append("\n");
                         log("[agent] " + msg);
-                        // v2.98：实时流式推送（节流 2 秒，只推关键信息）
-                        if (shouldStream(msg)) {
+                        try {
+                            String fl = FloatWindow.briefLine(msg);
+                            if (fl != null) FloatWindow.pushLine(fl);
+                        } catch (Exception ignored) {
+                        }
+                        // v3.37：节流 2 秒编辑同一条进度消息（原 shouldStream 逐条发已废弃）
+                        if (msg.startsWith("🖐")) progSteps[0]++;
+                        if (progressId > 0) {
                             long now = System.currentTimeMillis();
-                            if (now - tgLastPushMs > 2000) {
-                                tgLastPushMs = now;
-                                sendMessage(chatId, msg);
+                            if (now - progLastEdit[0] > 2000) {
+                                progLastEdit[0] = now;
+                                sendTyping(chatId);
+                                String txt = buildProgressText(goal,
+                                        logs.toString(), progSteps[0], progStart);
+                                if (!txt.equals(progLastText[0])) {
+                                    progLastText[0] = txt;
+                                    editMessage(chatId, progressId, txt);
+                                }
                             }
                         }
                     }
@@ -309,24 +417,80 @@ public class TgBot {
                 });
         // 远程（Telegram）进来：高风险动作无审批人时默认拦截，不自动放行
         loop.setRemote(true);
+        loop.setChannel("tg");
+        if (!convCtx.isEmpty()) loop.setConversationContext(convCtx);
+        loop.setSupervisorClient(llmStore.supervisorClient());
         loop.setApprover((action, detail) -> {
             sendMessage(chatId, "⛔ 远程拦截高风险动作：" + action
                     + "\n在手机 App 上执行可弹窗确认。");
             return false;
         });
+        floatShow("🎯 TG任务：" + goal);
         boolean done;
         try {
-            done = loop.run(goal, 12);
+            done = loop.run(goal, AgentLoop.NO_LIMIT);
         } catch (Exception e) {
+            if (progressId > 0) {
+                editMessage(chatId, progressId, "❌ 执行异常：" + e.getMessage());
+            }
             sendMessage(chatId, "执行异常：" + e.getMessage());
+            floatEnd("❌ TG任务异常");
             tgTaskRunning = false;
+            TaskLock.release("tg");
             return;
         } finally {
             tgTaskRunning = false;
+            TaskLock.release("tg");
         }
-        String stopNote = tgTaskStop ? "（被 /stop 打断）\n\n" : "\n\n";
-        sendMessage(chatId, (done ? "🎉 任务完成" : "⏹ 任务结束（未完成）")
-                + stopNote + trimLog(logs.toString()));
+        floatEnd(done ? "✅ TG任务完成" : "⏹ TG任务结束");
+        // v3.37：结尾只发简短总结（状态+答复+用时/步数），不再倒整段日志
+        String ans = extractFinalAnswer(logs.toString());
+        StringBuilder fin = new StringBuilder();
+        fin.append(done ? "🎉 任务完成" : "⏹ 任务结束（未完成）");
+        if (tgTaskStop) fin.append("（被 /stop 打断）");
+        fin.append("\n🎯 ").append(goal).append("\n");
+        if (!ans.isEmpty()) fin.append("🤖 ").append(ans).append("\n");
+        fin.append("⏱ 用时 ").append(elapsedText(progStart))
+                .append(" · 共 ").append(progSteps[0]).append(" 步");
+        {
+            // v3.45：尾巴逻辑收敛到 SharedMemory.tail60，三端统一
+            String tail = SharedMemory.tail60(ans);
+            SharedMemory.addRound(ctx, "tg", goal,
+                    (done ? "任务完成" : "任务未完成")
+                            + (tail.isEmpty() ? "" : "，" + tail));
+        }
+        if (progressId > 0) {
+            editMessage(chatId, progressId, fin.toString());
+        } else {
+            sendMessage(chatId, fin.toString());
+        }
+    }
+
+    // v3.37：进度消息文本（目标 + 状态 + 步数/用时 + 日志尾部）
+    private String buildProgressText(String goal, String logs,
+                                     int steps, long startMs) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("🎯 ").append(goal).append("\n");
+        sb.append("⏳ 执行中… 第 ").append(steps).append(" 步 · 已用 ")
+                .append(elapsedText(startMs)).append("\n\n");
+        String tail = logs.length() > 2600
+                ? logs.substring(logs.length() - 2600) : logs;
+        sb.append(tail);
+        return sb.toString();
+    }
+
+    private static String elapsedText(long startMs) {
+        long sec = (System.currentTimeMillis() - startMs) / 1000;
+        return sec >= 60 ? (sec / 60) + "分" + (sec % 60) + "秒" : sec + "秒";
+    }
+
+    /** 从日志里提最后一条模型答复（🤖 开头） */
+    private String extractFinalAnswer(String logs) {
+        String ans = "";
+        for (String line : logs.split("\n")) {
+            if (line.startsWith("🤖 ")) ans = line.substring(2).trim();
+        }
+        return ans;
     }
 
     // v2.98：判断哪些消息值得实时推送（关键节点，不刷屏）
@@ -336,12 +500,22 @@ public class TgBot {
                 || msg.startsWith("✅") || msg.startsWith("❌");
     }
 
-    /** /shot：截屏发照片 */
+    /** 判断是否为截图请求（自然语言） */
+    private boolean isScreenshotAsk(String text) {
+        if (text == null) return false;
+        String t = text.trim();
+        // 精确匹配常见说法
+        if (t.equals("截图") || t.equals("截屏") || t.equals("截个屏") || t.equals("截一张屏")) return true;
+        // 包含关键词
+        return (t.contains("截图") || t.contains("截屏")) && (t.contains("当前") || t.contains("界面") || t.contains("屏幕") || t.length() <= 6);
+    }
+
+    /** /shot：截屏发照片（v3.22-hotfix：改用 ScreenshotUtil.capture，无障碍→root 两级，不再只依赖无障碍） */
     private void sendScreenshot(long chatId) {
         try {
-            Bitmap bmp = AgentAccessibilityService.screenshot();
+            Bitmap bmp = ScreenshotUtil.capture(ctx);
             if (bmp == null) {
-                sendMessage(chatId, "截屏失败（无障碍未开启或系统拒绝）");
+                sendMessage(chatId, "截屏失败（无障碍未开启且 root 截屏也失败）");
                 return;
             }
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
