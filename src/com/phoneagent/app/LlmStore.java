@@ -18,6 +18,7 @@ import java.util.UUID;
  * 存 files/llm_profiles.json：{activeId, profiles:[{id,name,provider,baseUrl,apiKey,model}]}
  * 首次运行从旧版 SharedPreferences("llm") 迁移单配置为"默认"档案。
  * apiKey 只存本地、只发往用户自己填的 baseUrl，界面脱敏显示，绝不打日志。
+ * v3.13 Issue 2：落盘时经 Keystore 加密（ENC: 前缀），读取自动解密兼容明文。
  */
 public class LlmStore {
 
@@ -64,6 +65,7 @@ public class LlmStore {
     private final SharedPreferences oldPref;
     private final List<Profile> profiles = new ArrayList<>();
     private String activeId;
+    private String supervisorId = "";
 
     public LlmStore(Context ctx) {
         Context ac = ctx.getApplicationContext();
@@ -227,6 +229,29 @@ public class LlmStore {
         return new LlmClient(getBaseUrl(), getApiKeyRaw(), getModel());
     }
 
+    /** 监管者档案：默认主力（active），可在模型配置里长按任意档案指定 */
+    public synchronized Profile supervisorProfile() {
+        if (supervisorId != null && !supervisorId.isEmpty()) {
+            for (Profile p : profiles) if (p.id.equals(supervisorId)) return p;
+        }
+        return getActive();
+    }
+
+    public synchronized void setSupervisorId(String id) {
+        supervisorId = id == null ? "" : id;
+        save();
+    }
+
+    public synchronized String getSupervisorId() {
+        return supervisorId == null ? "" : supervisorId;
+    }
+
+    /** 监管者专用 client（默认最强模型=主力档案） */
+    public LlmClient supervisorClient() {
+        Profile p = supervisorProfile();
+        return p != null ? clientFor(p) : client();
+    }
+
     /** 用指定档案测试连接（不切换激活） */
     public LlmClient clientFor(Profile p) {
         return new LlmClient(p.baseUrl, p.apiKey, p.model);
@@ -236,6 +261,7 @@ public class LlmStore {
         try {
             JSONObject root = new JSONObject();
             root.put("activeId", activeId);
+            root.put("supervisorId", supervisorId == null ? "" : supervisorId);
             JSONArray arr = new JSONArray();
             for (Profile p : profiles) {
                 JSONObject o = new JSONObject();
@@ -243,7 +269,8 @@ public class LlmStore {
                 o.put("name", p.name);
                 o.put("provider", p.provider);
                 o.put("baseUrl", p.baseUrl);
-                o.put("apiKey", p.apiKey);
+                // v3.13 Issue 2：apiKey 落盘加密
+                o.put("apiKey", CryptoUtil.encrypt(p.apiKey));
                 o.put("model", p.model);
                 o.put("visionModel", p.visionModel == null ? "" : p.visionModel);
                 arr.put(o);
@@ -260,6 +287,7 @@ public class LlmStore {
             String txt = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
             JSONObject root = new JSONObject(txt);
             activeId = root.optString("activeId", "");
+            supervisorId = root.optString("supervisorId", "");
             JSONArray arr = root.optJSONArray("profiles");
             if (arr == null) return;
             for (int i = 0; i < arr.length(); i++) {
@@ -269,7 +297,7 @@ public class LlmStore {
                 p.name = o.optString("name", "配置");
                 p.provider = o.optString("provider", "自定义");
                 p.baseUrl = o.optString("baseUrl", "");
-                p.apiKey = o.optString("apiKey", "");
+                p.apiKey = CryptoUtil.decrypt(o.optString("apiKey", ""));
                 p.model = o.optString("model", "");
                 p.visionModel = o.optString("visionModel", "");
                 profiles.add(p);
