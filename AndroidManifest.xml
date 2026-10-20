@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.phoneagent.app"
-    android:versionCode="121"
-    android:versionName="3.09">
+    android:versionCode="157"
+    android:versionName="3.45">
 
     <!-- INTERNET 仅用于首次下载官方 Termux 环境（约 30MB，一次性）；日常使用仍本地执行 -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -14,6 +14,7 @@
     <uses-permission android:name="android.permission.FLASHLIGHT" />
     <!-- 刻意不申请其他网络相关能力；HTTP 控制服务仅监听本地 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- 应用内更新：下载后调起系统安装 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
@@ -75,5 +76,12 @@
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="本地 HTTP 控制服务：接收用户自己设备的自动化指令" />
         </service>
+        <receiver android:name=".BootReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="com.phoneagent.app.WATCHDOG" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>
