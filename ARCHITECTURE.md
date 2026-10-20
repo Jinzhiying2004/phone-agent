@@ -59,6 +59,14 @@ CRITICAL（破坏性）。远控/TG 进来的高风险动作无审批人时默�
 - minSdk 26（Android 8.0），targetSdk 28（绕 Android 10+ W^X，Termux 需要）
 - 手工编译链（aapt2+javac+d8+apksigner），无 Gradle
 
+## Issue 11 决策：本地 OCR 为什么先做降级版
+
+完整本地 OCR（ML Kit / PaddleOCR）需要 AAR + native so + 模型文件（10MB+），
+与本项目手工编译链（aapt2+javac+d8，无 Gradle）集成成本高，且会显著增大 APK。
+v3.13 先做零依赖降级：vision 动作无可用模型时，从无障碍节点树本地匹配问题中的
+文字并返回坐标（`TaskRunner.visionLocalFallback`），覆盖最常用的"X 在哪"场景；
+纯图标识别仍需视觉模型。完整 OCR 引擎列为后续项。
+
 ## 数据流
 
 ```
