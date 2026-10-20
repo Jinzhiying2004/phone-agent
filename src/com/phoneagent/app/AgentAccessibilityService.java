@@ -1,1 +1,262 @@
-cGFja2FnZSBjb20ucGhvbmVhZ2VudC5hcHA7CgppbXBvcnQgYW5kcm9pZC5hY2Nlc3NpYmlsaXR5c2VydmljZS5BY2Nlc3NpYmlsaXR5U2VydmljZTsKaW1wb3J0IGFuZHJvaWQuYWNjZXNzaWJpbGl0eXNlcnZpY2UuR2VzdHVyZURlc2NyaXB0aW9uOwppbXBvcnQgYW5kcm9pZC5ncmFwaGljcy5QYXRoOwppbXBvcnQgYW5kcm9pZC5ncmFwaGljcy5SZWN0OwppbXBvcnQgYW5kcm9pZC5vcy5CdWlsZDsKaW1wb3J0IGFuZHJvaWQub3MuQnVuZGxlOwppbXBvcnQgYW5kcm9pZC52aWV3LmFjY2Vzc2liaWxpdHkuQWNjZXNzaWJpbGl0eUV2ZW50OwppbXBvcnQgYW5kcm9pZC52aWV3LmFjY2Vzc2liaWxpdHkuQWNjZXNzaWJpbGl0eU5vZGVJbmZvOwoKaW1wb3J0IGphdmEudXRpbC5BcnJheUxpc3Q7CmltcG9ydCBqYXZhLnV0aWwuTGlzdDsKaW1wb3J0IGphdmEudXRpbC5jb25jdXJyZW50LkNvdW50RG93bkxhdGNoOwppbXBvcnQgamF2YS51dGlsLmNvbmN1cnJlbnQuVGltZVVuaXQ7CgovKioKICog5qC45b+D5oSf55+l5LiO5omn6KGM5bGC77ya6K+75bGP77yI5Ymq5p6d5ZCO55qE57uT5p6E5YyW6IqC54K577yJKyDngrnlh7sv5omL5Yq/L+i+k+WFpeOAggogKiDlhajpg6jlnKjmiYvmnLrmnKzlnLDlrozmiJDvvIzkuI3nu4/ov4flpKfmqKHlnosg4oCU4oCUIOi/meWwseaYr+mbtiB0b2tlbiDnmoTlhbPplK7jgIIKICovCnB1YmxpYyBjbGFzcyBBZ2VudEFjY2Vzc2liaWxpdHlTZXJ2aWNlIGV4dGVuZHMgQWNjZXNzaWJpbGl0eVNlcnZpY2UgewoKICAgIHB1YmxpYyBzdGF0aWMgY2xhc3MgTm9kZUluZm8gewogICAgICAgIHB1YmxpYyBTdHJpbmcgdGV4dCA9ICIiOwogICAgICAgIHB1YmxpYyBTdHJpbmcgZGVzYyA9ICIiOwogICAgICAgIHB1YmxpYyBib29sZWFuIGNsaWNrYWJsZTsKICAgICAgICBwdWJsaWMgaW50IGN4LCBjeTsKICAgICAgICBwdWJsaWMgaW50IGFyZWE7CiAgICAgICAgQWNjZXNzaWJpbGl0eU5vZGVJbmZvIG5vZGU7IC8vIOS7heeCueWHu+aXtuS9v+eUqAogICAgfQoKICAgIHByaXZhdGUgc3RhdGljIHZvbGF0aWxlIEFnZW50QWNjZXNzaWJpbGl0eVNlcnZpY2UgaW5zdGFuY2U7CgogICAgcHVibGljIHN0YXRpYyBib29sZWFuIGlzUnVubmluZygpIHsKICAgICAgICByZXR1cm4gaW5zdGFuY2UgIT0gbnVsbDsKICAgIH0KCiAgICAvKiog5L6bIEVsZW1lbnREdW1wZXIg562J6I635Y+W5pyN5Yqh5a6e5L6LICovCiAgICBwdWJsaWMgc3RhdGljIEFnZW50QWNjZXNzaWJpbGl0eVNlcnZpY2UgZ2V0KCkgewogICAgICAgIHJldHVybiBpbnN0YW5jZTsKICAgIH0KCiAgICAvKioKICAgICAqIOaXoOmanOeijeaIquWxj++8iEFQSSAzMCvvvIzml6DpnIAgcm9vdO+8ieOAggogICAgICog5ZCM5q2l562J5b6F5pyA5aSaIDEwIOenku+8jOaIkOWKn+i/lOWbniBCaXRtYXDvvIzlpLHotKXov5Tlm54gbnVsbOOAggogICAgICovCiAgICBwdWJsaWMgc3RhdGljIGFuZHJvaWQuZ3JhcGhpY3MuQml0bWFwIHNjcmVlbnNob3QoKSB7CiAgICAgICAgQWdlbnRBY2Nlc3NpYmlsaXR5U2VydmljZSBzID0gaW5zdGFuY2U7CiAgICAgICAgaWYgKHMgPT0gbnVsbCB8fCBCdWlsZC5WRVJTSU9OLlNES19JTlQgPCAzMCkgcmV0dXJuIG51bGw7CiAgICAgICAgZmluYWwgYW5kcm9pZC5ncmFwaGljcy5CaXRtYXBbXSBvdXQgPSBuZXcgYW5kcm9pZC5ncmFwaGljcy5CaXRtYXBbMV07CiAgICAgICAgZmluYWwgQ291bnREb3duTGF0Y2ggbGF0Y2ggPSBuZXcgQ291bnREb3duTGF0Y2goMSk7CiAgICAgICAgamF2YS51dGlsLmNvbmN1cnJlbnQuRXhlY3V0b3IgZXhlYyA9CiAgICAgICAgICAgICAgICBqYXZhLnV0aWwuY29uY3VycmVudC5FeGVjdXRvcnMubmV3U2luZ2xlVGhyZWFkRXhlY3V0b3IoKTsKICAgICAgICB0cnkgewogICAgICAgICAgICBzLnRha2VTY3JlZW5zaG90KGFuZHJvaWQudmlldy5EaXNwbGF5LkRFRkFVTFRfRElTUExBWSwgZXhlYywKICAgICAgICAgICAgICAgICAgICBuZXcgVGFrZVNjcmVlbnNob3RDYWxsYmFjaygpIHsKICAgICAgICAgICAgICAgICAgICAgICAgQE92ZXJyaWRlCiAgICAgICAgICAgICAgICAgICAgICAgIHB1YmxpYyB2b2lkIG9uU3VjY2VzcyhTY3JlZW5zaG90UmVzdWx0IHJlc3VsdCkgewogICAgICAgICAgICAgICAgICAgICAgICAgICAgdHJ5IHsKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBhbmRyb2lkLmhhcmR3YXJlLkhhcmR3YXJlQnVmZmVyIGhiID0KICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHJlc3VsdC5nZXRIYXJkd2FyZUJ1ZmZlcigpOwogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGFuZHJvaWQuZ3JhcGhpY3MuQml0bWFwIGh3ID0KICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGFuZHJvaWQuZ3JhcGhpY3MuQml0bWFwLndyYXBIYXJkd2FyZUJ1ZmZlcigKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgaGIsIHJlc3VsdC5nZXRDb2xvclNwYWNlKCkpOwogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGlmIChodyAhPSBudWxsKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIG91dFswXSA9IGh3LmNvcHkoCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgYW5kcm9pZC5ncmFwaGljcy5CaXRtYXAuQ29uZmlnLkFSR0JfODg4OCwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBmYWxzZSk7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGhiLmNsb3NlKCk7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICB9IGNhdGNoIChFeGNlcHRpb24gaWdub3JlZCkgewogICAgICAgICAgICAgICAgICAgICAgICAgICAgfSBmaW5hbGx5IHsKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBsYXRjaC5jb3VudERvd24oKTsKICAgICAgICAgICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgICAgICAgICAgfQoKICAgICAgICAgICAgICAgICAgICAgICAgQE92ZXJyaWRlCiAgICAgICAgICAgICAgICAgICAgICAgIHB1YmxpYyB2b2lkIG9uRmFpbHVyZShpbnQgZXJyb3JDb2RlKSB7CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBsYXRjaC5jb3VudERvd24oKTsKICAgICAgICAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgICAgIH0pOwogICAgICAgICAgICBsYXRjaC5hd2FpdCgxMCwgVGltZVVuaXQuU0VDT05EUyk7CiAgICAgICAgfSBjYXRjaCAoRXhjZXB0aW9uIGUpIHsKICAgICAgICAgICAgcmV0dXJuIG51bGw7CiAgICAgICAgfSBmaW5hbGx5IHsKICAgICAgICAgICAgKChqYXZhLnV0aWwuY29uY3VycmVudC5FeGVjdXRvclNlcnZpY2UpIGV4ZWMpLnNodXRkb3duKCk7CiAgICAgICAgfQogICAgICAgIHJldHVybiBvdXRbMF07CiAgICB9CgogICAgQE92ZXJyaWRlCiAgICBwcm90ZWN0ZWQgdm9pZCBvblNlcnZpY2VDb25uZWN0ZWQoKSB7CiAgICAgICAgaW5zdGFuY2UgPSB0aGlzOwogICAgICAgIC8vIHYzLjIyLWhvdGZpeO+8muW8gOacuuiHquWQr+i/nOaOp+acjeWKoeOAguaXoOmanOeijeacjeWKoeeUseezu+e7n+WcqOW8gOacuuWQjuiHquWKqOe7keWumu+8jAogICAgICAgIC8vIOWcqOatpOmhuuaJi+aLiei1tyBBZ2VudFNlcnZpY2XvvIjng63ooaXkuIHmlrnmoYjvvIzml6DpnIDmlLkgTWFuaWZlc3TvvInjgIIKICAgICAgICAvLyDms6jmhI/vvJrku4XlnKjnlKjmiLflt7LlkK/nlKjml6Dpmpznoo3mnI3liqHml7bnlJ/mlYjjgIIKICAgICAgICB0cnkgewogICAgICAgICAgICBhbmRyb2lkLmNvbnRlbnQuSW50ZW50IGkgPSBuZXcgYW5kcm9pZC5jb250ZW50LkludGVudCgKICAgICAgICAgICAgICAgICAgICB0aGlzLCBBZ2VudFNlcnZpY2UuY2xhc3MpOwogICAgICAgICAgICBpZiAoYW5kcm9pZC5vcy5CdWlsZC5WRVJTSU9OLlNES19JTlQgPj0gMjYpIHsKICAgICAgICAgICAgICAgIHN0YXJ0Rm9yZWdyb3VuZFNlcnZpY2UoaSk7CiAgICAgICAgICAgIH0gZWxzZSB7CiAgICAgICAgICAgICAgICBzdGFydFNlcnZpY2UoaSk7CiAgICAgICAgICAgIH0KICAgICAgICAgICAgYW5kcm9pZC51dGlsLkxvZy5pKCJBZ2VudEExMXkiLAogICAgICAgICAgICAgICAgICAgICLlt7Lmi4notbcgQWdlbnRTZXJ2aWNl77yI5byA5py66Ieq5ZCv77yJIik7CiAgICAgICAgfSBjYXRjaCAoRXhjZXB0aW9uIGUpIHsKICAgICAgICAgICAgYW5kcm9pZC51dGlsLkxvZy53KCJBZ2VudEExMXkiLCAi5ouJ6LW3IEFnZW50U2VydmljZSDlpLHotKU6ICIgKyBlKTsKICAgICAgICB9CiAgICB9CgogICAgQE92ZXJyaWRlCiAgICBwdWJsaWMgYm9vbGVhbiBvblVuYmluZChhbmRyb2lkLmNvbnRlbnQuSW50ZW50IGludGVudCkgewogICAgICAgIGluc3RhbmNlID0gbnVsbDsKICAgICAgICByZXR1cm4gc3VwZXIub25VbmJpbmQoaW50ZW50KTsKICAgIH0KCiAgICBAT3ZlcnJpZGUKICAgIHB1YmxpYyB2b2lkIG9uQWNjZXNzaWJpbGl0eUV2ZW50KEFjY2Vzc2liaWxpdHlFdmVudCBldmVudCkgewogICAgfQoKICAgIEBPdmVycmlkZQogICAgcHVibGljIHZvaWQgb25JbnRlcnJ1cHQoKSB7CiAgICB9CgogICAgLyoqIOaKk+Wxj+W5tuWJquaene+8muWPquS/neeVmeWPr+eCueWHu+aIluacieaWh+acrC/mj4/ov7DnmoToioLngrkgKi8KICAgIHB1YmxpYyBzdGF0aWMgTGlzdDxOb2RlSW5mbz4gZHVtcFNjcmVlbigpIHsKICAgICAgICBMaXN0PE5vZGVJbmZvPiBvdXQgPSBuZXcgQXJyYXlMaXN0PD4oKTsKICAgICAgICBBZ2VudEFjY2Vzc2liaWxpdHlTZXJ2aWNlIHMgPSBpbnN0YW5jZTsKICAgICAgICBpZiAocyA9PSBudWxsKSByZXR1cm4gb3V0OwogICAgICAgIEFjY2Vzc2liaWxpdHlOb2RlSW5mbyByb290ID0gcy5nZXRSb290SW5BY3RpdmVXaW5kb3coKTsKICAgICAgICBpZiAocm9vdCA9PSBudWxsKSByZXR1cm4gb3V0OwogICAgICAgIHdhbGsocm9vdCwgb3V0LCBuZXcgUmVjdCgpKTsKICAgICAgICByZXR1cm4gb3V0OwogICAgfQoKICAgIHByaXZhdGUgc3RhdGljIHZvaWQgd2FsayhBY2Nlc3NpYmlsaXR5Tm9kZUluZm8gbiwgTGlzdDxOb2RlSW5mbz4gb3V0LCBSZWN0IHIpIHsKICAgICAgICBpZiAobiA9PSBudWxsKSByZXR1cm47CiAgICAgICAgQ2hhclNlcXVlbmNlIHQgPSBuLmdldFRleHQoKTsKICAgICAgICBDaGFyU2VxdWVuY2UgZCA9IG4uZ2V0Q29udGVudERlc2NyaXB0aW9uKCk7CiAgICAgICAgU3RyaW5nIHRleHQgPSB0ID09IG51bGwgPyAiIiA6IHQudG9TdHJpbmcoKS50cmltKCk7CiAgICAgICAgU3RyaW5nIGRlc2MgPSBkID09IG51bGwgPyAiIiA6IGQudG9TdHJpbmcoKS50cmltKCk7CiAgICAgICAgYm9vbGVhbiBjbGlja2FibGUgPSBuLmlzQ2xpY2thYmxlKCk7CiAgICAgICAgaWYgKGNsaWNrYWJsZSB8fCAhdGV4dC5pc0VtcHR5KCkgfHwgIWRlc2MuaXNFbXB0eSgpKSB7CiAgICAgICAgICAgIG4uZ2V0Qm91bmRzSW5TY3JlZW4ocik7CiAgICAgICAgICAgIGludCB3ID0gci53aWR0aCgpLCBoID0gci5oZWlnaHQoKTsKICAgICAgICAgICAgaWYgKHcgPiAwICYmIGggPiAwKSB7CiAgICAgICAgICAgICAgICBOb2RlSW5mbyBuaSA9IG5ldyBOb2RlSW5mbygpOwogICAgICAgICAgICAgICAgbmkudGV4dCA9IHRleHQ7CiAgICAgICAgICAgICAgICBuaS5kZXNjID0gZGVzYzsKICAgICAgICAgICAgICAgIG5pLmNsaWNrYWJsZSA9IGNsaWNrYWJsZTsKICAgICAgICAgICAgICAgIG5pLmN4ID0gci5jZW50ZXJYKCk7CiAgICAgICAgICAgICAgICBuaS5jeSA9IHIuY2VudGVyWSgpOwogICAgICAgICAgICAgICAgbmkuYXJlYSA9IHcgKiBoOwogICAgICAgICAgICAgICAgbmkubm9kZSA9IG47CiAgICAgICAgICAgICAgICBvdXQuYWRkKG5pKTsKICAgICAgICAgICAgfQogICAgICAgIH0KICAgICAgICBmb3IgKGludCBpID0gMDsgaSA8IG4uZ2V0Q2hpbGRDb3VudCgpOyBpKyspIHsKICAgICAgICAgICAgd2FsayhuLmdldENoaWxkKGkpLCBvdXQsIHIpOwogICAgICAgIH0KICAgIH0KCiAgICAvKiog5oyJ5YWz6ZSu6K+N5om+6IqC54K577ya5LyY5YWI5a6M5YWo5Yy56YWN44CB5LyY5YWI5Y+v54K55Ye744CB5LyY5YWI6Z2i56ev5bCPICovCiAgICBwdWJsaWMgc3RhdGljIE5vZGVJbmZvIGZpbmQoTGlzdDxOb2RlSW5mbz4gaXRlbXMsIFN0cmluZyBrZXl3b3JkKSB7CiAgICAgICAgTm9kZUluZm8gYmVzdCA9IG51bGw7CiAgICAgICAgbG9uZyBiZXN0U2NvcmUgPSBMb25nLk1BWF9WQUxVRTsKICAgICAgICBmb3IgKE5vZGVJbmZvIGl0IDogaXRlbXMpIHsKICAgICAgICAgICAgaWYgKCFpdC50ZXh0LmNvbnRhaW5zKGtleXdvcmQpICYmICFpdC5kZXNjLmNvbnRhaW5zKGtleXdvcmQpKSBjb250aW51ZTsKICAgICAgICAgICAgbG9uZyBzY29yZSA9IGl0LmFyZWE7CiAgICAgICAgICAgIGlmICghaXQuY2xpY2thYmxlKSBzY29yZSArPSAxMF8wMDBfMDAwTDsKICAgICAgICAgICAgaWYgKCEoaXQudGV4dC5lcXVhbHMoa2V5d29yZCkgfHwgaXQuZGVzYy5lcXVhbHMoa2V5d29yZCkpKSBzY29yZSArPSAxXzAwMF8wMDBfMDAwTDsKICAgICAgICAgICAgaWYgKHNjb3JlIDwgYmVzdFNjb3JlKSB7CiAgICAgICAgICAgICAgICBiZXN0U2NvcmUgPSBzY29yZTsKICAgICAgICAgICAgICAgIGJlc3QgPSBpdDsKICAgICAgICAgICAgfQogICAgICAgIH0KICAgICAgICByZXR1cm4gYmVzdDsKICAgIH0KCiAgICAvKiog54K55Ye76IqC54K577ya6Ieq6Lqr5LiN5Y+v54K55YiZ5ZCR5LiK5om+5Y+v54K55Ye755qE54i26IqC54K5ICovCiAgICBwdWJsaWMgc3RhdGljIGJvb2xlYW4gY2xpY2tOb2RlKE5vZGVJbmZvIG5pKSB7CiAgICAgICAgQWNjZXNzaWJpbGl0eU5vZGVJbmZvIG4gPSBuaS5ub2RlOwogICAgICAgIHdoaWxlIChuICE9IG51bGwpIHsKICAgICAgICAgICAgaWYgKG4uaXNDbGlja2FibGUoKSkgewogICAgICAgICAgICAgICAgcmV0dXJuIG4ucGVyZm9ybUFjdGlvbihBY2Nlc3NpYmlsaXR5Tm9kZUluZm8uQUNUSU9OX0NMSUNLKTsKICAgICAgICAgICAgfQogICAgICAgICAgICBuID0gbi5nZXRQYXJlbnQoKTsKICAgICAgICB9CiAgICAgICAgcmV0dXJuIGZhbHNlOwogICAgfQoKICAgIHB1YmxpYyBzdGF0aWMgYm9vbGVhbiB0YXBBdChpbnQgeCwgaW50IHkpIHsKICAgICAgICByZXR1cm4gZ2VzdHVyZSh4LCB5LCB4LCB5LCA4MCk7CiAgICB9CgogICAgcHVibGljIHN0YXRpYyBib29sZWFuIHN3aXBlKGludCB4MSwgaW50IHkxLCBpbnQgeDIsIGludCB5MiwgaW50IG1zKSB7CiAgICAgICAgcmV0dXJuIGdlc3R1cmUoeDEsIHkxLCB4MiwgeTIsIG1zKTsKICAgIH0KCiAgICBwcml2YXRlIHN0YXRpYyBib29sZWFuIGdlc3R1cmUoaW50IHgxLCBpbnQgeTEsIGludCB4MiwgaW50IHkyLCBpbnQgbXMpIHsKICAgICAgICBBZ2VudEFjY2Vzc2liaWxpdHlTZXJ2aWNlIHMgPSBpbnN0YW5jZTsKICAgICAgICBpZiAocyA9PSBudWxsIHx8IEJ1aWxkLlZFUlNJT04uU0RLX0lOVCA8IDI0KSByZXR1cm4gZmFsc2U7CiAgICAgICAgUGF0aCBwID0gbmV3IFBhdGgoKTsKICAgICAgICBwLm1vdmVUbyh4MSwgeTEpOwogICAgICAgIHAubGluZVRvKHgyLCB5Mik7CiAgICAgICAgR2VzdHVyZURlc2NyaXB0aW9uLlN0cm9rZURlc2NyaXB0aW9uIHN0cm9rZSA9CiAgICAgICAgICAgICAgICBuZXcgR2VzdHVyZURlc2NyaXB0aW9uLlN0cm9rZURlc2NyaXB0aW9uKHAsIDAsIE1hdGgubWF4KG1zLCA1MCkpOwogICAgICAgIEdlc3R1cmVEZXNjcmlwdGlvbiBnZCA9IG5ldyBHZXN0dXJlRGVzY3JpcHRpb24uQnVpbGRlcigpLmFkZFN0cm9rZShzdHJva2UpLmJ1aWxkKCk7CiAgICAgICAgZmluYWwgQ291bnREb3duTGF0Y2ggbGF0Y2ggPSBuZXcgQ291bnREb3duTGF0Y2goMSk7CiAgICAgICAgZmluYWwgYm9vbGVhbltdIG9rID0ge2ZhbHNlfTsKICAgICAgICBzLmRpc3BhdGNoR2VzdHVyZShnZCwgbmV3IEdlc3R1cmVSZXN1bHRDYWxsYmFjaygpIHsKICAgICAgICAgICAgQE92ZXJyaWRlCiAgICAgICAgICAgIHB1YmxpYyB2b2lkIG9uQ29tcGxldGVkKEdlc3R1cmVEZXNjcmlwdGlvbiBnKSB7CiAgICAgICAgICAgICAgICBva1swXSA9IHRydWU7CiAgICAgICAgICAgICAgICBsYXRjaC5jb3VudERvd24oKTsKICAgICAgICAgICAgfQoKICAgICAgICAgICAgQE92ZXJyaWRlCiAgICAgICAgICAgIHB1YmxpYyB2b2lkIG9uQ2FuY2VsbGVkKEdlc3R1cmVEZXNjcmlwdGlvbiBnKSB7CiAgICAgICAgICAgICAgICBsYXRjaC5jb3VudERvd24oKTsKICAgICAgICAgICAgfQogICAgICAgIH0sIG51bGwpOwogICAgICAgIHRyeSB7CiAgICAgICAgICAgIGxhdGNoLmF3YWl0KDUsIFRpbWVVbml0LlNFQ09ORFMpOwogICAgICAgIH0gY2F0Y2ggKEludGVycnVwdGVkRXhjZXB0aW9uIGUpIHsKICAgICAgICAgICAgVGhyZWFkLmN1cnJlbnRUaHJlYWQoKS5pbnRlcnJ1cHQoKTsKICAgICAgICB9CiAgICAgICAgcmV0dXJuIG9rWzBdOwogICAgfQoKICAgIHB1YmxpYyBzdGF0aWMgYm9vbGVhbiBnb0JhY2soKSB7CiAgICAgICAgQWdlbnRBY2Nlc3NpYmlsaXR5U2VydmljZSBzID0gaW5zdGFuY2U7CiAgICAgICAgcmV0dXJuIHMgIT0gbnVsbCAmJiBzLnBlcmZvcm1HbG9iYWxBY3Rpb24oR0xPQkFMX0FDVElPTl9CQUNLKTsKICAgIH0KCiAgICAvKiog5ZCR5b2T5YmN6L6T5YWl5qGG5YaZ5YWl5paH5pys77yI5pSv5oyB5Lit5paH77yJ77yM5q+UIGlucHV0IHRleHQg5Y+v6Z2g5b6X5aSaICovCiAgICBwdWJsaWMgc3RhdGljIGJvb2xlYW4gc2V0VGV4dChTdHJpbmcgdGV4dCkgewogICAgICAgIEFnZW50QWNjZXNzaWJpbGl0eVNlcnZpY2UgcyA9IGluc3RhbmNlOwogICAgICAgIGlmIChzID09IG51bGwpIHJldHVybiBmYWxzZTsKICAgICAgICBBY2Nlc3NpYmlsaXR5Tm9kZUluZm8gcm9vdCA9IHMuZ2V0Um9vdEluQWN0aXZlV2luZG93KCk7CiAgICAgICAgaWYgKHJvb3QgPT0gbnVsbCkgcmV0dXJuIGZhbHNlOwogICAgICAgIEFjY2Vzc2liaWxpdHlOb2RlSW5mbyB0YXJnZXQgPSBmaW5kRWRpdGFibGUocm9vdCk7CiAgICAgICAgaWYgKHRhcmdldCA9PSBudWxsKSB7CiAgICAgICAgICAgIHRhcmdldCA9IHJvb3QuZmluZEZvY3VzKEFjY2Vzc2liaWxpdHlOb2RlSW5mby5GT0NVU19JTlBVVCk7CiAgICAgICAgfQogICAgICAgIGlmICh0YXJnZXQgPT0gbnVsbCkgcmV0dXJuIGZhbHNlOwogICAgICAgIEJ1bmRsZSBiID0gbmV3IEJ1bmRsZSgpOwogICAgICAgIGIucHV0Q2hhclNlcXVlbmNlKEFjY2Vzc2liaWxpdHlOb2RlSW5mby5BQ1RJT05fQVJHVU1FTlRfU0VUX1RFWFRfQ0hBUlNFUVVFTkNFLCB0ZXh0KTsKICAgICAgICByZXR1cm4gdGFyZ2V0LnBlcmZvcm1BY3Rpb24oQWNjZXNzaWJpbGl0eU5vZGVJbmZvLkFDVElPTl9TRVRfVEVYVCwgYik7CiAgICB9CgogICAgcHJpdmF0ZSBzdGF0aWMgQWNjZXNzaWJpbGl0eU5vZGVJbmZvIGZpbmRFZGl0YWJsZShBY2Nlc3NpYmlsaXR5Tm9kZUluZm8gbikgewogICAgICAgIGlmIChuID09IG51bGwpIHJldHVybiBudWxsOwogICAgICAgIGlmIChuLmlzRWRpdGFibGUoKSAmJiBuLmlzRm9jdXNlZCgpKSByZXR1cm4gbjsKICAgICAgICBmb3IgKGludCBpID0gMDsgaSA8IG4uZ2V0Q2hpbGRDb3VudCgpOyBpKyspIHsKICAgICAgICAgICAgQWNjZXNzaWJpbGl0eU5vZGVJbmZvIHIgPSBmaW5kRWRpdGFibGUobi5nZXRDaGlsZChpKSk7CiAgICAgICAgICAgIGlmIChyICE9IG51bGwpIHJldHVybiByOwogICAgICAgIH0KICAgICAgICByZXR1cm4gbnVsbDsKICAgIH0KfQo=
+package com.phoneagent.app;
+
+import android.accessibilityservice.AccessibilityService;
+import android.accessibilityservice.GestureDescription;
+import android.graphics.Path;
+import android.graphics.Rect;
+import android.os.Build;
+import android.os.Bundle;
+import android.view.accessibility.AccessibilityEvent;
+import android.view.accessibility.AccessibilityNodeInfo;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * 核心感知与执行层：读屏（剪枝后的结构化节点）+ 点击/手势/输入。
+ * 全部在手机本地完成，不经过大模型 —— 这就是零 token 的关键。
+ */
+public class AgentAccessibilityService extends AccessibilityService {
+
+    public static class NodeInfo {
+        public String text = "";
+        public String desc = "";
+        public boolean clickable;
+        public int cx, cy;
+        public int area;
+        AccessibilityNodeInfo node; // 仅点击时使用
+    }
+
+    private static volatile AgentAccessibilityService instance;
+
+    public static boolean isRunning() {
+        return instance != null;
+    }
+
+    /** 供 ElementDumper 等获取服务实例 */
+    public static AgentAccessibilityService get() {
+        return instance;
+    }
+
+    /**
+     * 无障碍截屏（API 30+，无需 root）。
+     * 同步等待最多 10 秒，成功返回 Bitmap，失败返回 null。
+     */
+    public static android.graphics.Bitmap screenshot() {
+        AgentAccessibilityService s = instance;
+        if (s == null || Build.VERSION.SDK_INT < 30) return null;
+        final android.graphics.Bitmap[] out = new android.graphics.Bitmap[1];
+        final CountDownLatch latch = new CountDownLatch(1);
+        java.util.concurrent.Executor exec =
+                java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {
+            s.takeScreenshot(android.view.Display.DEFAULT_DISPLAY, exec,
+                    new TakeScreenshotCallback() {
+                        @Override
+                        public void onSuccess(ScreenshotResult result) {
+                            try {
+                                android.hardware.HardwareBuffer hb =
+                                        result.getHardwareBuffer();
+                                android.graphics.Bitmap hw =
+                                        android.graphics.Bitmap.wrapHardwareBuffer(
+                                                hb, result.getColorSpace());
+                                if (hw != null) {
+                                    out[0] = hw.copy(
+                                            android.graphics.Bitmap.Config.ARGB_8888,
+                                            false);
+                                }
+                                hb.close();
+                            } catch (Exception ignored) {
+                            } finally {
+                                latch.countDown();
+                            }
+                        }
+
+                        @Override
+                        public void onFailure(int errorCode) {
+                            latch.countDown();
+                        }
+                    });
+            latch.await(10, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            return null;
+        } finally {
+            ((java.util.concurrent.ExecutorService) exec).shutdown();
+        }
+        return out[0];
+    }
+
+    @Override
+    protected void onServiceConnected() {
+        instance = this;
+        // v3.22-hotfix：开机自启远控服务。无障碍服务由系统在开机后自动绑定，
+        // 在此顺手拉起 AgentService（热补丁方案，无需改 Manifest）。
+        // 注意：仅在用户已启用无障碍服务时生效。
+        try {
+            android.content.Intent i = new android.content.Intent(
+                    this, AgentService.class);
+            if (android.os.Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(i);
+            } else {
+                startService(i);
+            }
+            android.util.Log.i("AgentA11y",
+                    "已拉起 AgentService（开机自启）");
+        } catch (Exception e) {
+            android.util.Log.w("AgentA11y", "拉起 AgentService 失败: " + e);
+        }
+    }
+
+    @Override
+    public boolean onUnbind(android.content.Intent intent) {
+        instance = null;
+        return super.onUnbind(intent);
+    }
+
+    @Override
+    public void onAccessibilityEvent(AccessibilityEvent event) {
+    }
+
+    @Override
+    public void onInterrupt() {
+    }
+
+    /** 抓屏并剪枝：只保留可点击或有文本/描述的节点 */
+    public static List<NodeInfo> dumpScreen() {
+        List<NodeInfo> out = new ArrayList<>();
+        AgentAccessibilityService s = instance;
+        if (s == null) return out;
+        AccessibilityNodeInfo root = s.getRootInActiveWindow();
+        if (root == null) return out;
+        walk(root, out, new Rect());
+        return out;
+    }
+
+    private static void walk(AccessibilityNodeInfo n, List<NodeInfo> out, Rect r) {
+        if (n == null) return;
+        CharSequence t = n.getText();
+        CharSequence d = n.getContentDescription();
+        String text = t == null ? "" : t.toString().trim();
+        String desc = d == null ? "" : d.toString().trim();
+        boolean clickable = n.isClickable();
+        if (clickable || !text.isEmpty() || !desc.isEmpty()) {
+            n.getBoundsInScreen(r);
+            int w = r.width(), h = r.height();
+            if (w > 0 && h > 0) {
+                NodeInfo ni = new NodeInfo();
+                ni.text = text;
+                ni.desc = desc;
+                ni.clickable = clickable;
+                ni.cx = r.centerX();
+                ni.cy = r.centerY();
+                ni.area = w * h;
+                ni.node = n;
+                out.add(ni);
+            }
+        }
+        for (int i = 0; i < n.getChildCount(); i++) {
+            walk(n.getChild(i), out, r);
+        }
+    }
+
+    /** 按关键词找节点：优先完全匹配、优先可点击、优先面积小 */
+    public static NodeInfo find(List<NodeInfo> items, String keyword) {
+        NodeInfo best = null;
+        long bestScore = Long.MAX_VALUE;
+        for (NodeInfo it : items) {
+            if (!it.text.contains(keyword) && !it.desc.contains(keyword)) continue;
+            long score = it.area;
+            if (!it.clickable) score += 10_000_000L;
+            if (!(it.text.equals(keyword) || it.desc.equals(keyword))) score += 1_000_000_000L;
+            if (score < bestScore) {
+                bestScore = score;
+                best = it;
+            }
+        }
+        return best;
+    }
+
+    /** 点击节点：自身不可点则向上找可点击的父节点 */
+    public static boolean clickNode(NodeInfo ni) {
+        AccessibilityNodeInfo n = ni.node;
+        while (n != null) {
+            if (n.isClickable()) {
+                return n.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+            }
+            n = n.getParent();
+        }
+        return false;
+    }
+
+    public static boolean tapAt(int x, int y) {
+        return gesture(x, y, x, y, 80);
+    }
+
+    public static boolean swipe(int x1, int y1, int x2, int y2, int ms) {
+        return gesture(x1, y1, x2, y2, ms);
+    }
+
+    private static boolean gesture(int x1, int y1, int x2, int y2, int ms) {
+        AgentAccessibilityService s = instance;
+        if (s == null || Build.VERSION.SDK_INT < 24) return false;
+        Path p = new Path();
+        p.moveTo(x1, y1);
+        p.lineTo(x2, y2);
+        GestureDescription.StrokeDescription stroke =
+                new GestureDescription.StrokeDescription(p, 0, Math.max(ms, 50));
+        GestureDescription gd = new GestureDescription.Builder().addStroke(stroke).build();
+        final CountDownLatch latch = new CountDownLatch(1);
+        final boolean[] ok = {false};
+        s.dispatchGesture(gd, new GestureResultCallback() {
+            @Override
+            public void onCompleted(GestureDescription g) {
+                ok[0] = true;
+                latch.countDown();
+            }
+
+            @Override
+            public void onCancelled(GestureDescription g) {
+                latch.countDown();
+            }
+        }, null);
+        try {
+            latch.await(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        return ok[0];
+    }
+
+    public static boolean goBack() {
+        AgentAccessibilityService s = instance;
+        return s != null && s.performGlobalAction(GLOBAL_ACTION_BACK);
+    }
+
+    /** 向当前输入框写入文本（支持中文），比 input text 可靠得多 */
+    public static boolean setText(String text) {
+        AgentAccessibilityService s = instance;
+        if (s == null) return false;
+        AccessibilityNodeInfo root = s.getRootInActiveWindow();
+        if (root == null) return false;
+        AccessibilityNodeInfo target = findEditable(root);
+        if (target == null) {
+            target = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+        }
+        if (target == null) return false;
+        Bundle b = new Bundle();
+        b.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
+        return target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, b);
+    }
+
+    private static AccessibilityNodeInfo findEditable(AccessibilityNodeInfo n) {
+        if (n == null) return null;
+        if (n.isEditable() && n.isFocused()) return n;
+        for (int i = 0; i < n.getChildCount(); i++) {
+            AccessibilityNodeInfo r = findEditable(n.getChild(i));
+            if (r != null) return r;
+        }
+        return null;
+    }
+}
