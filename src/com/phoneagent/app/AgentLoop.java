@@ -5,919 +5,882 @@ import android.content.Context;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.util.Arrays;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 /**
- * Agent 主循环：眼睛（读屏）→ 大脑（大模型思考）→ 手（执行动作）。
- * <p>
- * 设计原则（手机端适配）：
- * <ul>
- * <li>省 token：界面用紧凑文本（编号+文字）而非截图传给模型；
- *      历史保留近 5 轮，老轮次只留动作摘要（思考截断 40 字）</li>
- * <li>安全：动作白名单，不含 shell/skill 等高危步骤；有最大步数与手动停止</li>
- * <li>零常驻：跑在调用方起的后台线程，无障碍/任务执行器都是现成的本地能力</li>
- * </ul>
- */
+* v3.26 DSH(DeepSeek Harness) 式智能体：会话即状态，工具即接口。
+* <ul>
+* <li>循环：messages + 原生工具调用。模型自己决定看屏（observe）、调哪个工具、何时结束（文本回复=答复）。</li>
+* <li>harness 只做四件事：执行工具、注入观察、权限分级、护栏（停止/超时/步数/零动作拦截）。</li>
+* <li>没有规划器/监管者/计划状态机/硬编码规则——那些已整体下线。</li>
+* </ul>
+* 对外 API 与旧版保持一致（构造/setters/run/getAuditJson），三端无需改调用。
+*/
 public class AgentLoop {
+// v3.34：步数不设限——模型自己决定何时结束；999 仅为防死循环熔断，正常任务碰不到
+public static final int NO_LIMIT = 999;
 
-    public interface Listener {
-        void onLog(String msg);
+public interface Listener {
+void onLog(String msg);
 
-        boolean isStopped();
+boolean isStopped();
 
-        /** 超时/卡住时询问用户是否继续，返回 true=继续 */
-        default boolean askContinue(String reason) {
-            return true;
-        }
-    }
+/** 超时/无进展时询问用户是否继续，返回 true=继续 */
+default boolean askContinue(String reason) {
+return true;
+}
+}
 
-    /** 循环内允许模型调用的动作（白名单） */
-    private static final Set<String> ALLOWED = new HashSet<>(Arrays.asList(
-            "tap_text", "tap_id", "tap", "input", "swipe", "back",
-            "wait_text", "sleep", "launch", "screenshot", "use_card",
-            "termux", "vision"
-    ));
+private final Context ctx;
+private final LlmClient llm;
+private final Listener listener;
 
-    /** 高级动作：shell/文件/网络/搜索，需用户在界面开启 */
-    private static final Set<String> ALLOWED_ADV = new HashSet<>(Arrays.asList(
-            "shell", "read_file", "write_file", "fetch_url", "search"
-    ));
+// ---- 通道配置（setters 保持旧 API） ----
+private boolean allowAdvanced = true;
+private ActionRisk.Policy riskPolicy = null;
+private TaskRunner.Approver approver = null;
+private boolean remote = false;
+private String conversationContext = "";
+private String planHint = "";
+private String supervisorHint = "";
+private boolean supervisorEnabled = true;
+private LlmClient supervisorClient = null;
+private android.graphics.Bitmap supShot = null;
+private int supFinalRounds = 0;
+private int lastActionsDone = 0;
+private int lastMutationsDone = 0;
+private boolean stoppedByUser = false;
+private java.util.function.Supplier<String> feedbackSupplier;
+private boolean vdMode = false;
 
-    private static final int HISTORY_KEEP = 5;
+private TaskRunLogger taskLogger = null;
+private String lastHistory = "";
+private final java.util.List<JSONObject> auditSteps = new java.util.ArrayList<>();
 
-    private boolean allowAdvanced = true;
-    private String lastHistory = "";
-    private String supervisorFeedback = "";
-    private boolean supervisorEnabled = true;
-    // ---- 工作流：todo 拆解 + 验证 + 排错 ----
-    /** 当前计划步骤（todo 列表） */
-    private final java.util.List<String> todoSteps = new java.util.ArrayList<>();
-    private int todoIndex = 0;
-    /** 连续失败计数（用于智能换方法） */
-    private int failStreak = 0;
-    /** 上一步的屏幕指纹（用于验证动作是否生效） */
-    private String lastScreenFp = "";
-    // ---- v2.45 任务规划增强 ----
-    /** 结构化任务计划（子任务拆解 + 试错记录 + 检查点） */
-    private TaskPlan taskPlan = new TaskPlan();
-    /** 最近成功启动的应用包名（自恢复 L2 用） */
-    private String lastLaunchPkg = "";
-    /** 自恢复阶梯等级（1=返回 2=重进 3=回退检查点），有进展清零 */
-    private int recoveryLevel = 0;
-    /** 累计自恢复轮数（防无限恢复） */
-    private int recoveryRounds = 0;
-    private static final int MAX_RECOVERY_ROUNDS = 6;
-    /** 待注入 prompt 的系统提醒（如下轮换招） */
-    private String pendingNudge = "";
-    private ActionRisk.Policy riskPolicy = null;
-    private TaskRunner.Approver approver = null;
-    private boolean remote = false;
-    // v2.49 AutoGLM 式视觉优先：本任务是否可用 vision 输入（失败一次就回退纯文本）
-    private boolean visionOk = true;
-    // v2.51 借鉴 ApkClaw：(屏幕指纹, 上一步动作) 二元组循环检测
-    private String lastPairSig = "";
-    private int pairRepeat = 0;
-    private String prevDoneActions = "";
-    private final java.util.List<JSONObject> auditSteps = new java.util.ArrayList<>();
+public AgentLoop(Context ctx, LlmClient llm, Listener listener) {
+this.ctx = ctx.getApplicationContext();
+this.llm = llm;
+this.listener = listener;
+}
 
-    /** 审计：每步动作明细（do/ok/输出摘要），供运行记录存档 */
-    public String getAuditJson() {
-        try {
-            JSONArray arr = new JSONArray();
-            for (JSONObject o : auditSteps) arr.put(o);
-            return arr.toString();
-        } catch (Exception e) {
-            return "[]";
-        }
-    }
+// ---- setters（旧签名保留；规划/监管类在新架构下只作上下文提示，不再驱动流程） ----
+public void setAllowAdvanced(boolean v) { allowAdvanced = v;}
+public void setRiskPolicy(ActionRisk.Policy p) { riskPolicy = p;}
+public void setApprover(TaskRunner.Approver a) { approver = a;}
+public void setRemote(boolean r) { remote = r;}
+public void setSupervisorEnabled(boolean v) { supervisorEnabled = v;}
+public void setSupervisorClient(LlmClient c) { supervisorClient = c;}
+public void setSupervisorFeedback(String fb) {
+supervisorHint = fb == null? "": fb;
+}
+public void setFeedbackSupplier(java.util.function.Supplier<String> sup) {
+feedbackSupplier = sup;
+}
+public void setConversationContext(String c) {
+conversationContext = c == null? "": c;
+}
+public void setPlan(String plan) { planHint = plan == null? "": plan;}
 
-    public void setRiskPolicy(ActionRisk.Policy p) {
-        riskPolicy = p;
-    }
+private String channel = "unknown";
+/** 智能沉淀：标记来源通道（app/tg/remote） */
+public void setChannel(String ch) { channel = ch == null ? "unknown" : ch; }
+public void setTodoSteps(java.util.List<String> steps) { /* 新架构模型自主推进，忽略 */}
 
-    public void setApprover(TaskRunner.Approver a) {
-        approver = a;
-    }
+public String getLastHistory() { return lastHistory;}
 
-    public void setRemote(boolean r) {
-        remote = r;
-    }
+public String getTaskLogPath() {
+return taskLogger!= null? taskLogger.getPath(): null;
+}
 
-    public void setSupervisorEnabled(boolean v) {
-        supervisorEnabled = v;
-    }
-    private String thinkerPlan = "";
-    private java.util.function.Supplier<String> feedbackSupplier;
+/** 审计：每次工具调用明细（name/ok），供运行记录存档 */
+public String getAuditJson() {
+try {
+JSONArray arr = new JSONArray();
+for (JSONObject o: auditSteps) arr.put(o);
+return arr.toString();
+} catch (Exception e) {
+return "[]";
+}
+}
 
-    public void setSupervisorFeedback(String fb) {
-        supervisorFeedback = fb == null ? "" : fb;
-    }
+private void log(String s) {
+if (listener!= null) listener.onLog(s);
+}
 
-    /** 用户实时反馈供应商（每步检查，有则注入 prompt） */
-    public void setFeedbackSupplier(java.util.function.Supplier<String> sup) {
-        feedbackSupplier = sup;
-    }
+private boolean streamOutput() {
+try {
+return ctx.getSharedPreferences("agent", Context.MODE_PRIVATE)
+.getBoolean("stream_output", true);
+} catch (Exception e) {
+return true;
+}
+}
 
-    private String conversationContext = "";
+private static Boolean cachedRoot = null;
 
-    /** 对话上下文（本次会话最近的消息，让 agent 有记忆） */
-    public void setConversationContext(String ctx) {
-        conversationContext = ctx == null ? "" : ctx;
-    }
+/** root 检测（缓存） */
+static boolean checkRootOnce() {
+if (cachedRoot!= null) return cachedRoot;
+boolean ok = false;
+try {
+Process pr = Runtime.getRuntime().exec(new String[]{"su", "-c", "exit"});
+ok = pr.waitFor() == 0;
+} catch (Exception ignored) {
+}
+cachedRoot = ok;
+return ok;
+}
 
-    /** 思考者的执行计划 */
-    public void setPlan(String plan) {
-        thinkerPlan = plan == null ? "" : plan;
-    }
+/**
+* 在调用线程执行（调用方负责后台线程）。
+*
+* @return true=完成，false=中断/失败/达最大步数
+*/
+/** 本次任务是否操作过主屏（决定结束时要不要回桌面） */
+private boolean touchedMain = false;
 
-    /** 设置 todo 步骤列表（工作流拆解） */
-    public void setTodoSteps(java.util.List<String> steps) {
-        todoSteps.clear();
-        if (steps != null) todoSteps.addAll(steps);
-        todoIndex = 0;
-        failStreak = 0;
-    }
+public boolean run(String goal, int maxSteps) {
+// v3.36：虚拟屏按通道分工——App 通道自动开屏（带悬浮预览），
+// TG/远控主屏执行。结束统一清理残屏。
+touchedMain = false;
+supFinalRounds = 0;
+stoppedByUser = false;
+try {
+Telemetry.event(ctx, channel, "task_start", taskData(goal, ""));
+long runStartMs = System.currentTimeMillis();
+try {
+String exp = SharedMemory.relevantExperience(ctx, goal);
+if (!exp.isEmpty()) {
+conversationContext = conversationContext.isEmpty()
+? exp : conversationContext + "\n" + exp;
+log("🧠 已注入共享经验（三端历史任务）");
+}
+} catch (Exception ignored) {
+}
+boolean ok = runSession(goal, maxSteps);
+// v3.38：agent 判未完成时监管者再看一眼最终界面——阴差阳错已达成的改判完成
+if (!ok && supervisorEnabled && !stoppedByUser && lastActionsDone > 0) {
+Supervisor.Verdict fv = finalReview(goal, false, lastHistory);
+if (fv != null && fv.ok && fv.completed) {
+log("🔍 监管者改判：目标实际已达成（约 " + fv.progressPct + "%）");
+ok = true;
+}
+}
+try {
+org.json.JSONObject td = taskData(goal, ok ? "" : "\u672a\u5b8c\u6210");
+td.put("ok", ok);
+Telemetry.event(ctx, channel, "task_end", td);
+} catch (Exception ignored) {
+}
+try {
+SharedMemory.addExperience(ctx, channel, goal, ok,
+System.currentTimeMillis() - runStartMs, lastActionsDone,
+ok ? "" : "未完成");
+} catch (Exception ignored) {
+}
+return ok;
+} finally {
+boolean wasInVd = false;
+try {
+wasInVd = VirtualDisplayManager.isActive();
+if (wasInVd) {
+VirtualDisplayManager.destroy();
+log("虚拟屏已销毁");
+}
+} catch (Exception ignored) {
+}
+vdMode = false;
+if (supShot != null) {
+try { supShot.recycle(); } catch (Exception ignored) {}
+supShot = null;
+}
+// 铁律：任务结束回桌面——只对操作过主屏的任务；
+// 全程在虚拟屏的任务不打扰主屏（v3.18）
+if (touchedMain && !wasInVd) {
+try {
+Root.exec("input keyevent 3");
+} catch (Exception ignored) {
+}
+}
+}
+}
 
-    /** 标记当前步骤完成，前进到下一步 */
-    public void todoDone() {
-        if (todoIndex < todoSteps.size()) todoIndex++;
-        failStreak = 0;
-    }
+/**
+* DSH 式会话循环。状态就是 messages 本身；工具见 {@link PhoneTools}。
+* 完成判定：模型在至少调用过一次工具后给出文本回复，或直接调 finish 语义的文本答复。
+* 零动作拦截：一次工具都没调就想用文字结束 → 提醒一次；再犯判失败（防"口头完成"）。
+*/
+/** 8x8 平均哈希：判断两帧界面是否几乎一样（监管看门狗用） */
+private static long avgHash(android.graphics.Bitmap b) {
+try {
+android.graphics.Bitmap s = android.graphics.Bitmap.createScaledBitmap(b, 8, 8, true);
+int[] px = new int[64];
+s.getPixels(px, 0, 8, 0, 0, 8, 8);
+long[] gray = new long[64];
+long sum = 0;
+for (int i = 0; i < 64; i++) {
+int c = px[i];
+gray[i] = (android.graphics.Color.red(c) + android.graphics.Color.green(c) + android.graphics.Color.blue(c)) / 3;
+sum += gray[i];
+}
+long avg = sum / 64;
+long h = 0;
+for (int i = 0; i < 64; i++) if (gray[i] >= avg) h |= (1L << i);
+if (s != b) s.recycle();
+return h;
+} catch (Exception e) {
+return 0;
+}
+}
 
-    /** 记录失败（连续失败多了提示换方法） */
-    public void todoFail() {
-        failStreak++;
-    }
+private long sessionStartMs = 0;
 
-    /** 当前 todo 进度描述 */
-    public String todoProgress() {
-        if (todoSteps.isEmpty()) return "";
-        StringBuilder sb = new StringBuilder();
-        sb.append("\n📋 任务拆解 (").append(todoIndex + 1)
-                .append("/").append(todoSteps.size()).append("):\n");
-        for (int i = 0; i < todoSteps.size(); i++) {
-            sb.append(i < todoIndex ? "✅ " : (i == todoIndex ? "▶ " : "⏳ "))
-                    .append(todoSteps.get(i)).append("\n");
-        }
-        if (failStreak >= 2) {
-            sb.append("⚠ 已连续失败 ").append(failStreak)
-                    .append(" 次，换个方法试试（比如文本点不到就用 vision 看坐标）\n");
-        }
-        return sb.toString();
-    }
+private org.json.JSONObject taskData(String goal, String whyTag) {
+try {
+org.json.JSONObject d = new org.json.JSONObject();
+d.put("goal", Telemetry.cut(goal, 60));
+if (sessionStartMs > 0) d.put("ms", System.currentTimeMillis() - sessionStartMs);
+if (whyTag != null && !whyTag.isEmpty()) d.put("why", whyTag);
+return d;
+} catch (Exception e) {
+return null;
+}
+}
 
-    /** 屏幕指纹：用于验证动作是否生效（简单哈希） */
-    public static String screenFingerprint(String screenText) {
-        if (screenText == null) return "";
-        // 取关键特征：长度 + 前 200 字符的哈希
-        String key = screenText.length() + ":"
-                + (screenText.length() > 200
-                ? screenText.substring(0, 200) : screenText);
-        return Integer.toHexString(key.hashCode());
-    }
+private boolean runSession(String goal, int maxSteps) {
+sessionStartMs = System.currentTimeMillis();
+log("🎯 目标：" + goal);
+try {
+taskLogger = new TaskRunLogger(ctx, goal);
+} catch (Exception ignored) {
+}
+TaskRunner runner = new TaskRunner(ctx, listener::onLog);
+if (riskPolicy!= null) runner.setRiskPolicy(riskPolicy);
+runner.setApprover(approver);
+runner.setRemote(remote);
+// v3.36 通道分工：只有 App 内命令走虚拟屏（自动开屏 + 右上角悬浮预览）；
+// TG/远控在主屏正常执行（PhoneTools 会拒绝其 vd_start）。
+PhoneTools.sessionChannel = channel;
+VirtualDisplayManager.setPreviewEnabled("app".equals(channel));
+runner.setVdMode(false);
+if ("app".equals(channel)) {
+try {
+boolean vdOn = ctx.getSharedPreferences("agent", Context.MODE_PRIVATE)
+.getBoolean("task_vd_default", true);
+if (vdOn) {
+int did = VirtualDisplayManager.create(ctx, 720, 1280, 320);
+if (did >= 0) {
+runner.setVdMode(true);
+vdMode = true;
+log("🖥 App 通道：任务在虚拟屏执行（右上角悬浮预览中）");
+} else {
+log("虚拟屏创建失败，改在主屏执行");
+}
+}
+} catch (Exception ignored) {
+}
+}
+try {
+String rp = ctx.getSharedPreferences("agent", Context.MODE_PRIVATE)
+.getString("remote_risk_policy", "deny");
+runner.setRemoteRiskPolicy(rp);
+} catch (Exception ignored) {
+}
 
-    /** 验证动作是否生效：屏幕是否变化 */
-    public String verifyAction(String beforeFp, String afterFp,
-                               String actionDesc) {
-        if (beforeFp.equals(afterFp)) {
-            return "⚠ 动作未生效（屏幕无变化）：" + actionDesc
-                    + "，请换方法或检查目标是否存在";
-        }
-        return "";
-    }
+JSONArray messages = new JSONArray();
+StringBuilder hist = new StringBuilder();
+try {
+JSONObject sys = new JSONObject();
+sys.put("role", "system");
+sys.put("content", sessionSystemPrompt(goal));
+messages.put(sys);
+JSONObject u = new JSONObject();
+u.put("role", "user");
+StringBuilder ub = new StringBuilder("任务：").append(goal);
+if (!planHint.isEmpty()) ub.append("\n（参考计划，仅供参考，可灵活调整：").append(planHint).append("）");
+if (!supervisorHint.isEmpty()) ub.append("\n（上次未完成反馈：").append(supervisorHint).append("）");
+u.put("content", ub.toString());
+messages.put(u);
+} catch (Exception e) {
+log("会话初始化失败：" + e.getMessage());
+return false;
+}
 
-    public void setAllowAdvanced(boolean v) {
-        allowAdvanced = v;
-    }
+int actionsDone = 0; // 实际执行的工具数（不含 observe）
+int textOnlyStrikes = 0; // 零动作想结束的次数
+int mutationsDone = 0; // v3.43：成功的状态改变类工具数（完成硬门槛用）
+int zeroMutStrikes = 0; // v3.43：只有观察/空转却想结束的次数
+int turn = 0;
+// v3.35 监管看门狗状态：只在死循环/连续失败/幻觉信号时请最强模型介入
+java.util.List<String> wdSigs = new java.util.ArrayList<>();
+java.util.List<String> wdRecent = new java.util.ArrayList<>();
+java.util.Map<String, Integer> wdTapMiss = new java.util.HashMap<>();
+int wdFailStreak = 0;
+int wdCooldown = 0;
+int wdInterventions = 0;
+int wdLastCheckTurn = 0;
+long wdLastHash = 0;
+int wdSameScreen = 0;
+boolean wdActed = false;
+while (turn < maxSteps) {
+turn++;
+if (listener!= null && listener.isStopped()) {
+stoppedByUser = true;
+log("已手动停止");
+lastHistory = hist.toString();
+return false;
+}
+// 用户实时反馈（App 通道）
+try {
+String fb = feedbackSupplier!= null? feedbackSupplier.get(): null;
+if (fb!= null &&!fb.trim().isEmpty()) {
+log("💬 用户补充：" + fb);
+JSONObject fm = new JSONObject();
+fm.put("role", "user");
+fm.put("content", "用户补充：" + fb);
+messages.put(fm);
+}
+} catch (Exception ignored) {
+}
 
-    public String getLastHistory() {
-        return lastHistory;
-    }
+if (taskLogger!= null) taskLogger.stepStart(turn);
+log("🤔 第 " + turn + " 轮思考中...");
+LlmClient.ToolReply tr = llm.chatTools(messages, toolsForSession());
+if (!tr.ok) {
+if (tr.httpToolsRejected) {
+log("⛔ 当前模型端点不支持工具调用（function calling），agent 无法执行。"
++ "请在「大模型配置」换一个支持工具调用的模型（如 DeepSeek 官方）。");
+try {
+org.json.JSONObject fd = new org.json.JSONObject();
+fd.put("flag", "tools_rejected");
+Telemetry.event(ctx, channel, "model_flag", fd);
+} catch (Exception ignored) {
+}
+} else {
+log("大脑请求失败：" + tr.error);
+}
+lastHistory = hist.toString();
+return false;
+}
+appendAssistant(messages, tr);
+if (tr.text!= null &&!tr.text.trim().isEmpty()) {
+if (streamOutput()) log("💭 " + tr.text.trim());
+if (taskLogger!= null) taskLogger.think(tr.text.trim());
+hist.append("💭 ").append(tr.text.trim()).append("\n");
+}
 
-    private final Context ctx;
-    private final LlmClient llm;
-    private final Listener listener;
+if (tr.calls.isEmpty()) {
+// 模型给文本：有过实际动作=最终答复；零动作=口头完成，拦截
+if (actionsDone > 0) {
+String ans = tr.text == null? "": tr.text.trim();
+if (!ans.isEmpty()) log("🤖 " + ans);
+// v3.38：完成与否由监管者终审（看最终界面+截图裁定），不再由执行 agent 自证
+boolean reviewConfirmed = false;
+if (supervisorEnabled) {
+Supervisor.Verdict fv = finalReview(goal, true, hist.toString());
+if (fv != null && fv.ok && !fv.completed) {
+if (supFinalRounds >= 2) {
+log("⛔ 监管者终审多次判定未完成，任务结束");
+if (taskLogger!= null) taskLogger.finish(false, "监管者终审未通过");
+lastHistory = hist.toString();
+return false;
+}
+supFinalRounds++;
+log("🔍 监管者终审：尚未完成（约 " + fv.progressPct + "%）"
++ (fv.missing.isEmpty()? "": "，还缺：" + fv.missing));
+try {
+JSONObject rm = new JSONObject();
+rm.put("role", "user");
+rm.put("content", "【监管者终审】任务还没有完成。完成度约 "
++ fv.progressPct + "%。"
++ (fv.missing.isEmpty()? "": "还缺：" + fv.missing + "。")
++ (fv.nextAction.isEmpty()? "": "建议下一步：" + fv.nextAction + "。")
++ "不要重复已完成的步骤，只补缺失部分。");
+messages.put(rm);
+} catch (Exception ignored) {
+}
+continue;
+}
+if (fv != null && fv.ok) {
+reviewConfirmed = true;
+log("🔍 监管者终审：确认完成（约 " + fv.progressPct + "%）");
+} else {
+// v3.43：终审不可用不再回退自判放行——按未完成处理（如实告知）
+log("⛔ 监管者终审不可用，本次完成未经核实，按未完成处理");
+if (taskLogger!= null) taskLogger.finish(false, "终审不可用，未核实");
+lastHistory = hist.toString();
+return false;
+}
+}
+if (mutationsDone == 0 && !reviewConfirmed) {
+// v3.43 硬门槛：只有观察/空转、没有任何成功的状态改变操作，
+// 且无监管终审背书 → 不准判完成（纯核实类任务靠终审确认放行）
+zeroMutStrikes++;
+if (zeroMutStrikes >= 2) {
+log("⛔ 只有观察/空转、没有任何实际执行，任务未完成");
+if (taskLogger!= null) taskLogger.finish(false, "无实际执行");
+lastHistory = hist.toString();
+return false;
+}
+log("⚠️ 还没有任何改变状态的实际操作，已提醒它先执行再下结论");
+try {
+JSONObject n = new JSONObject();
+n.put("role", "user");
+n.put("content", "系统记录显示你至今没有任何一次成功的状态改变操作"
++ "（tap/input/launch/shell 等），只有观察不算完成任务。"
++ "请实际执行；如果这个任务确实只需核实查看，"
++ "请在回复中明确说明你核实到的事实，等待监管者终审确认。");
+messages.put(n);
+} catch (Exception ignored) {
+}
+continue;
+}
+log("✅ 任务完成");
+if (taskLogger!= null) {
+taskLogger.finish(true, ans);
+log("📝 任务日志已保存");
+}
+lastHistory = hist.toString();
+return true;
+}
+textOnlyStrikes++;
+try {
+org.json.JSONObject fd = new org.json.JSONObject();
+fd.put("flag", "text_only");
+Telemetry.event(ctx, channel, "model_flag", fd);
+} catch (Exception ignored) {
+}
+if (textOnlyStrikes >= 2) {
+log("⛔ 模型两次只说不做，任务失败");
+if (taskLogger!= null) taskLogger.finish(false, "只说不做");
+lastHistory = hist.toString();
+return false;
+}
+log("⚠️ 模型还没动手就想下结论，已提醒它实际执行");
+try {
+JSONObject n = new JSONObject();
+n.put("role", "user");
+n.put("content", "系统记录显示你还没有调用任何工具，口头完成无效。"
++ "请调用工具实际执行任务（需要看屏幕先调 observe），做完再回复。");
+messages.put(n);
+} catch (Exception ignored) {
+}
+continue;
+}
 
-    public AgentLoop(Context ctx, LlmClient llm, Listener listener) {
-        this.ctx = ctx.getApplicationContext();
-        this.llm = llm;
-        this.listener = listener;
-    }
+// 执行本轮工具调用
+for (JSONObject call: tr.calls) {
+if (listener!= null && listener.isStopped()) {
+stoppedByUser = true;
+log("已手动停止");
+lastHistory = hist.toString();
+return false;
+}
+String name = call.optString("name");
+String argsJson = call.optString("argsJson", "{}");
+String callId = call.optString("id");
+log("🖐 " + name);
+hist.append("🖐 ").append(name).append(" ").append(argsJson).append("\n");
+boolean vdNow = false;
+try { vdNow = VirtualDisplayManager.isActive(); } catch (Exception ignored) {}
+PhoneTools.Exec ex = PhoneTools.execute(ctx, runner, name, argsJson, vdNow);
+if (!vdNow && !"observe".equals(name)) touchedMain = true;
+vdMode = vdNow;
+if (!"observe".equals(name)) {
+actionsDone++;
+lastActionsDone = actionsDone;
+}
+if (ex.ok && isMutationTool(name)) {
+mutationsDone++;
+lastMutationsDone = mutationsDone;
+}
+// v3.35 看门狗记录：动作签名/成败/结果摘要（监管介入时回放）
+if (!"observe".equals(name)) {
+String sig = name + "|" + argsJson.replaceAll("\\s+", "");
+wdSigs.add(sig);
+if (wdSigs.size() > 12) wdSigs.remove(0);
+if (ex.ok) wdFailStreak = 0; else wdFailStreak++;
+if ("tap_text".equals(name) && !ex.ok) {
+try {
+String tgt = new JSONObject(argsJson).optString("text", "");
+if (!tgt.isEmpty()) {
+Integer mc = wdTapMiss.get(tgt);
+wdTapMiss.put(tgt, mc == null ? 1 : mc + 1);
+}
+} catch (Exception ignored) {}
+}
+}
+if (!"observe".equals(name) && !"sleep".equals(name)) wdActed = true;
+if ("observe".equals(name) && ex.shot != null) {
+try {
+long h = avgHash(ex.shot);
+if (wdLastHash != 0) {
+if (Long.bitCount(h ^ wdLastHash) <= 3) {
+if (wdActed) wdSameScreen++;
+} else {
+wdSameScreen = 0;
+}
+}
+wdLastHash = h;
+wdActed = false;
+android.graphics.Bitmap copy = android.graphics.Bitmap.createScaledBitmap(ex.shot, 360, 640, true);
+if (supShot != null) supShot.recycle();
+supShot = copy;
+} catch (Exception ignored) {}
+}
+{
+String rs = ex.text == null ? "" : ex.text.replace("\n", " ");
+if (rs.length() > 80) rs = rs.substring(0, 80);
+wdRecent.add(name + " → " + (ex.ok ? "成功" : "失败") + "：" + rs);
+if (wdRecent.size() > 14) wdRecent.remove(0);
+}
+try {
+JSONObject au = new JSONObject();
+au.put("n", turn);
+au.put("do", name);
+au.put("ok", ex.ok);
+au.put("risk", ActionRisk.levelFor(name).label);
+auditSteps.add(au);
+try {
+org.json.JSONObject td = new org.json.JSONObject();
+td.put("name", name);
+td.put("ok", ex.ok);
+if (!ex.ok) td.put("err", Telemetry.cut(ex.text, 90));
+Telemetry.event(ctx, channel, "tool_call", td);
+} catch (Exception ignored2) {
+}
+} catch (Exception ignored) {
+}
+try {
+JSONObject tm = new JSONObject();
+tm.put("role", "tool");
+tm.put("tool_call_id", callId);
+tm.put("content", ex.text == null? "": ex.text);
+messages.put(tm);
+// observe 的截图以图片消息跟上（只留最新一帧，旧图剥除省 token）
+if (ex.shot!= null) {
+stripImages(messages);
+JSONObject im = new JSONObject();
+im.put("role", "user");
+im.put("content", "observe 截图：");
+im.put("image_b64", bitmapToJpegB64(ex.shot));
+messages.put(im);
+try { ex.shot.recycle();} catch (Exception ignored) {}
+}
+} catch (Exception ignored) {
+}
+}
+// v3.35 监管看门狗：有异常信号才触发最强模型裁决，无信号零打扰
+if (supervisorEnabled) {
+String trigger = null;
+if (wdCooldown > 0) {
+wdCooldown--;
+} else {
+java.util.Map<String, Integer> cnt = new java.util.HashMap<>();
+for (String sg : wdSigs) {
+Integer c = cnt.get(sg);
+cnt.put(sg, c == null ? 1 : c + 1);
+}
+for (java.util.Map.Entry<String, Integer> e : cnt.entrySet()) {
+if (e.getValue() >= 3) { trigger = "疑似死循环：动作「" + e.getKey() + "」已重复 " + e.getValue() + " 次"; break; }
+}
+if (trigger == null && wdSigs.size() >= 6) {
+int n = wdSigs.size();
+String sa = wdSigs.get(n - 6), sb2 = wdSigs.get(n - 5);
+if (!sa.equals(sb2) && sa.equals(wdSigs.get(n - 4)) && sb2.equals(wdSigs.get(n - 3))
+&& sa.equals(wdSigs.get(n - 2)) && sb2.equals(wdSigs.get(n - 1))) {
+trigger = "疑似死循环：两个动作交替重复（" + sa + " / " + sb2 + "）";
+}
+}
+if (trigger == null && wdFailStreak >= 4) {
+trigger = "陷入困境：已连续 " + wdFailStreak + " 次工具调用失败";
+}
+if (trigger == null && wdSameScreen >= 2) {
+trigger = "无进展：连续多次操作后界面几乎没有变化（动作不起作用或在原地打转）";
+}
+if (trigger == null) {
+for (java.util.Map.Entry<String, Integer> e : wdTapMiss.entrySet()) {
+if (e.getValue() >= 2) { trigger = "疑似幻觉：反复查找界面上不存在的文本「" + e.getKey() + "」（已失败 " + e.getValue() + " 次）"; break; }
+}
+}
+if (trigger == null && turn - wdLastCheckTurn >= 10) {
+trigger = "例行复核（已执行 " + turn + " 轮）";
+}
+}
+if (trigger != null) {
+wdLastCheckTurn = turn;
+if (wdInterventions >= 3) {
+log("🛡 监管者已介入 3 次仍无改善，任务结束：" + trigger);
+if (taskLogger != null) taskLogger.finish(false, "监管多次介入无改善");
+lastHistory = hist.toString();
+return false;
+}
+wdInterventions++;
+LlmClient sup = supervisorClient != null ? supervisorClient : llm;
+StringBuilder rb = new StringBuilder();
+for (String line : wdRecent) rb.append(line).append("\n");
+String histAll = hist.toString();
+String thoughts = histAll.length() > 1500 ? histAll.substring(histAll.length() - 1500) : histAll;
+Supervisor.Intervention iv = Supervisor.intervene(sup, goal, trigger, rb.toString(), thoughts, supShot);
+try {
+org.json.JSONObject fd = new org.json.JSONObject();
+fd.put("flag", "supervisor");
+fd.put("trigger", Telemetry.cut(trigger, 60));
+fd.put("action", iv.ok ? iv.action : "unavailable");
+Telemetry.event(ctx, channel, "model_flag", fd);
+} catch (Exception ignored) {}
+if (!iv.ok) {
+log("🛡 监管者暂时不可用（" + trigger + "），继续执行");
+wdCooldown = 8;
+} else if ("abort".equals(iv.action)) {
+log("🛡 监管者判定中止：" + iv.message);
+if (taskLogger != null) taskLogger.finish(false, "监管者中止：" + iv.message);
+lastHistory = hist.toString();
+return false;
+} else if ("guide".equals(iv.action)) {
+log("🛡 监管者介入：" + iv.message);
+try {
+JSONObject gm = new JSONObject();
+gm.put("role", "user");
+gm.put("content", "【监管者介入】" + iv.message + "\n请按这个指引调整做法，不要重复刚才的失败路径。");
+messages.put(gm);
+} catch (Exception ignored) {}
+wdCooldown = 8;
+} else {
+log("🛡 监管者复核：无异常，继续（" + trigger + "）");
+wdCooldown = 8;
+}
+wdSigs.clear();
+wdTapMiss.clear();
+wdFailStreak = 0;
+wdSameScreen = 0;
+}
+}
+// 上下文防膨胀：回合过多时压缩中段（保留 system+任务+最近 24 条）
+compactMessages(messages);
+}
+log("⏹ 轮次用尽（" + maxSteps + "），任务未完成");
+if (taskLogger!= null) taskLogger.finish(false, "轮次用尽");
+lastHistory = hist.toString();
+return false;
+}
 
-    private void log(String s) {
-        if (listener != null) listener.onLog(s);
-    }
+/** 本次会话的工具表：高级工具（shell/文件/网络）需 allowAdvanced */
+private JSONArray toolsForSession() {
+JSONArray all = PhoneTools.schemas();
+if (allowAdvanced) return all;
+JSONArray out = new JSONArray();
+try {
+for (int i = 0; i < all.length(); i++) {
+JSONObject w = all.getJSONObject(i);
+String n = w.getJSONObject("function").optString("name");
+if (n.equals("shell") || n.equals("read_file") || n.equals("write_file")
+|| n.equals("fetch_url") || n.equals("search")) continue;
+out.put(w);
+}
+} catch (Exception e) {
+return all;
+}
+return out;
+}
 
-    /**
-     * 在调用线程执行循环（调用方负责放后台线程）。
-     *
-     * @return true=模型判定完成，false=中断/失败/达最大步数
-     */
-    // v2.97：流式输出开关
-    private boolean streamOutput() {
-        try {
-            return ctx.getSharedPreferences("agent", Context.MODE_PRIVATE)
-                    .getBoolean("stream_output", true);
-        } catch (Exception e) {
-            return true;
-        }
-    }
+/** system prompt：只有环境与能力（DSH 风格，零流程规则） */
+private String sessionSystemPrompt(String goal) {
+StringBuilder p = new StringBuilder();
+p.append("你是「手机Agent」，在一台安卓手机上自主办事。\n");
+boolean hasRoot = checkRootOnce();
+boolean a11yOn = AgentAccessibilityService.isRunning();
+p.append("环境：").append(android.os.Build.MANUFACTURER).append(" ")
+.append(android.os.Build.MODEL)
+.append("，Android ").append(android.os.Build.VERSION.RELEASE)
+.append("；root ").append(hasRoot? "有": "无")
+.append("；无障碍 ").append(a11yOn? "已开": "未开").append("。");
+if (hasRoot) p.append("截屏与点击有 root 通道兜底。");
+if ("app".equals(channel)) {
+p.append("本任务在虚拟屏中执行（用户能在屏幕右上角看到预览），不打扰主屏；确需操作主屏当前状态时可调 vd_stop 切回主屏。");
+} else {
+p.append("本任务在主屏执行，直接操作即可。");
+}
+p.append("先理解用户真正要什么再动手：结合对话上下文和当前界面理解指代与言外之意，按目标推进，不要逐字死磕字面步骤；此路不通时换方法继续朝目标走。");
+p.append("\n你通过工具看屏和操作（执行通道 root 优先，无 root 才用无障碍）。完成任务后，用一段文字回复用户结果（不再调工具即结束）。");
+String cards = skillCardsSection(goal);
+if (!cards.isEmpty()) p.append("\n").append(cards);
+if (!conversationContext.isEmpty()) {
+p.append("\n").append(conversationContext);
+}
+try {
+String mem = UserMemory.describeForPrompt(ctx);
+if (!mem.isEmpty()) p.append("\n").append(mem);
+} catch (Exception ignored) {
+}
+return p.toString();
+}
 
-    // v2.93：任务运行日志
-    private TaskRunLogger taskLogger = null;
+private String skillCardsSection(String goal) {
+try {
+String d = new SkillCardStore(ctx).describeForPrompt(goal);
+if (d.isEmpty()) return "";
+return "可用技能卡（use_card 调用）：\n" + d + "\n";
+} catch (Exception e) {
+return "";
+}
+}
 
-    /** v3.08：获取本次任务日志路径（供 UI 显示入口） */
-    public String getTaskLogPath() {
-        return taskLogger != null ? taskLogger.getPath() : null;
-    }
+// ---- messages 小工具 ----
 
-    public boolean run(String goal, int maxSteps) {
-        log("🎯 目标：" + goal);
-        // v2.93：开始记录任务详细过程
-        try {
-            taskLogger = new TaskRunLogger(ctx, goal);
-        } catch (Exception ignored) {
-        }
-        // v2.45：结构化任务计划（拆解一次，状态机推进）
-        taskPlan = buildTaskPlan(goal);
-        recoveryLevel = 0;
-        recoveryRounds = 0;
-        pendingNudge = "";
-        visionOk = true; // v2.49：每任务重置 vision 可用性
-        lastPairSig = "";
-        pairRepeat = 0;
-        prevDoneActions = "";
-        log("📋 任务计划：" + taskPlan.size() + " 个子任务");
-        // v2.51 借鉴 ApkClaw：任务开始前按 Home，把手机重置到干净状态再动手
-        try {
-            Root.exec("input keyevent 3");
-            sleepQuiet(800);
-        } catch (Exception ignored) {}
-        StringBuilder history = new StringBuilder();
-        int rounds = 0;
-        // 实时监管状态
-        long taskStart = System.currentTimeMillis();
-        long lastProgress = taskStart;
-        String lastScreen = "";
-        int sameScreenCount = 0;
-        java.util.ArrayDeque<String> recentActs = new java.util.ArrayDeque<>();
-        final long TASK_TIMEOUT_MS = 5 * 60 * 1000;      // 任务总超时 5 分钟
-        final long STALL_TIMEOUT_MS = 90 * 1000;         // 无进展 90 秒
-        final int MONITOR_EVERY = 6;                      // 每 6 步 LLM 监管一次
+private void appendAssistant(JSONArray messages, LlmClient.ToolReply tr) {
+try {
+JSONObject am = new JSONObject();
+am.put("role", "assistant");
+am.put("content", tr.text == null? "": tr.text);
+if (!tr.calls.isEmpty()) {
+JSONArray tcs = new JSONArray();
+for (JSONObject call: tr.calls) {
+JSONObject fn = new JSONObject();
+fn.put("name", call.optString("name"));
+fn.put("arguments", call.optString("argsJson", "{}"));
+JSONObject tc = new JSONObject();
+tc.put("id", call.optString("id"));
+tc.put("type", "function");
+tc.put("function", fn);
+tcs.put(tc);
+}
+am.put("tool_calls", tcs);
+}
+messages.put(am);
+} catch (Exception ignored) {
+}
+}
 
-        for (int step = 1; step <= maxSteps; step++) {
-            if (listener != null && listener.isStopped()) {
-                log("已手动停止");
-                return false;
-            }
-            // 超时检查：主动询问用户
-            long elapsed = System.currentTimeMillis() - taskStart;
-            long idle = System.currentTimeMillis() - lastProgress;
-            if (elapsed > TASK_TIMEOUT_MS || idle > STALL_TIMEOUT_MS) {
-                String reason = buildTimeoutReason(goal, step, elapsed,
-                        idle, history.toString());
-                log("⏳ " + reason);
-                boolean goOn = listener != null
-                        && listener.askContinue(reason);
-                if (!goOn) {
-                    log("用户选择停止任务");
-                    return false;
-                }
-                log("用户选择继续");
-                // 重置计时，避免反复弹窗
-                taskStart = System.currentTimeMillis();
-                lastProgress = taskStart;
-            }
-            // 眼睛：读屏并序列化为紧凑文本
-            List<AgentAccessibilityService.NodeInfo> nodes =
-                    AgentAccessibilityService.dumpScreen();
-            if (nodes.isEmpty()) {
-                log("读屏为空（可能息屏），等待 3 秒重试");
-                sleepQuiet(3000);
-                nodes = AgentAccessibilityService.dumpScreen();
-                if (nodes.isEmpty()) {
-                    log("仍读不到界面，停止");
-                    return false;
-                }
-            }
-            String screen = serialize(nodes);
+private void stripImages(JSONArray messages) {
+try {
+for (int i = 0; i < messages.length(); i++) {
+JSONObject m = messages.getJSONObject(i);
+if (m.has("image_b64")) m.remove("image_b64");
+}
+} catch (Exception ignored) {
+}
+}
 
-            // v2.49 AutoGLM 式视觉优先：自适应截屏（首步必看；树稀疏/刚失败/每3步复核时看）
-            // 像人一样先看屏幕，而不是只读控件代码；token 省着花，不必每步都看
-            android.graphics.Bitmap shot = null;
-            // v2.81：V4 原生多模态，每步都截图直喂主模型
-            boolean wantShot = true;
-            if (wantShot) {
-                try {
-                    shot = ScreenshotUtil.capture(ctx);
-                } catch (Exception e) {
-                    log("截屏失败，本轮走纯文本");
-                }
-            }
+private void compactMessages(JSONArray messages) {
+try {
+final int LIMIT = 40, KEEP = 26;
+if (messages.length() <= LIMIT) return;
+JSONArray kept = new JSONArray();
+for (int i = 0; i < 2 && i < messages.length(); i++) {
+kept.put(messages.getJSONObject(i));
+}
+// 中段被压缩的回合给一条占位说明，避免 tool_call/result 断裂：从 assistant 边界切
+int start = messages.length() - KEEP;
+while (start < messages.length()
+&&!"assistant".equals(messages.getJSONObject(start).optString("role"))) {
+start++;
+}
+JSONObject note = new JSONObject();
+note.put("role", "user");
+note.put("content", "（较早的若干轮已省略，任务状态以最近消息为准）");
+kept.put(note);
+for (int i = start; i < messages.length(); i++) {
+kept.put(messages.getJSONObject(i));
+}
+while (messages.length() > 0) messages.remove(0);
+for (int i = 0; i < kept.length(); i++) messages.put(kept.getJSONObject(i));
+} catch (Exception ignored) {
+}
+}
 
-            // ---- 实时监管（零 token 本地检查） ----
-            String localWarn = null;
-            // 1. 界面无变化检测 → v2.45：走自恢复阶梯，不只告警
-            // v2.51 借鉴 ApkClaw：(屏幕指纹, 上一步动作) 二元组；动作也相同=真卡死，更早触发
-            String pairSig = screenFingerprint(screen) + "|" + prevDoneActions;
-            if (!prevDoneActions.isEmpty() && pairSig.equals(lastPairSig)) {
-                pairRepeat++;
-                if (pairRepeat >= 2) {
-                    pairRepeat = 0;
-                    log("🔁 屏幕+动作二元组重复，判定卡死");
-                    if (!doRecoveryLadder()) {
-                        log("🛟 自恢复已达上限，停止任务");
-                        return false;
-                    }
-                    continue; // 本轮跳过思考，下轮重新看屏验证恢复效果
-                }
-            } else {
-                pairRepeat = 0;
-                lastPairSig = pairSig;
-            }
-            if (screen.equals(lastScreen)) {
-                sameScreenCount++;
-                if (sameScreenCount >= 3) {
-                    sameScreenCount = 0;
-                    if (!doRecoveryLadder()) {
-                        log("🛟 自恢复已达上限，停止任务");
-                        return false;
-                    }
-                    continue; // 本轮跳过思考，下轮重新看屏验证恢复效果
-                }
-            } else {
-                sameScreenCount = 0;
-                lastScreen = screen;
-                lastProgress = System.currentTimeMillis();
-                recoveryLevel = 0; // 有进展，恢复阶梯清零
-            }
+/** v3.43：状态改变类工具（完成硬门槛只认这些的成功调用） */
+private static boolean isMutationTool(String n) {
+return "tap".equals(n) || "tap_text".equals(n) || "input".equals(n)
+|| "launch".equals(n) || "shell".equals(n) || "termux".equals(n)
+|| "swipe".equals(n) || "back".equals(n) || "key".equals(n)
+|| "home".equals(n) || "write_file".equals(n) || "use_card".equals(n)
+|| "vd_start".equals(n) || "vd_stop".equals(n);
+}
 
-            // 用户实时反馈：执行中指出的问题
-            try {
-                String userFb = feedbackSupplier != null
-                        ? feedbackSupplier.get() : null;
-                if (userFb != null && !userFb.trim().isEmpty()) {
-                    log("💬 用户补充：" + userFb);
-                    history.append("\n【用户实时补充】").append(userFb).append("\n");
-                }
-            } catch (Exception ignored) {
-            }
+/** v3.38：监管者终审（最终控件树 + 最新截图；不可用返回 null） */
+private Supervisor.Verdict finalReview(String goal, boolean workerSaid,
+String history) {
+try {
+String screenText = "";
+try {
+java.util.List<AgentAccessibilityService.NodeInfo> nodes =
+AgentAccessibilityService.dumpScreen();
+if (nodes != null && !nodes.isEmpty()) screenText = serialize(nodes);
+} catch (Exception ignored) {
+}
+if (screenText.isEmpty()) screenText = "（无控件树信息，见截图）";
+LlmClient sup = supervisorClient != null? supervisorClient: llm;
+Supervisor.Verdict v = Supervisor.review(sup, goal, workerSaid,
+history == null? "": history, screenText, supShot);
+// v3.43：终审结果打点——区分终审判错与终审缺席（旧版遥测分不清）
+try {
+org.json.JSONObject fd = new org.json.JSONObject();
+fd.put("flag", "final_review");
+fd.put("result", v == null? "null": (!v.ok? "error":
+(v.completed? "pass": "reject")));
+if (v != null) fd.put("pct", v.progressPct);
+Telemetry.event(ctx, channel, "model_flag", fd);
+} catch (Exception ignored) {
+}
+return v;
+} catch (Exception e) {
+return null;
+}
+}
 
-            // 2. 定期 LLM 监管（每 6 步）
-            String monitorAdvice = null;
-            if (step % MONITOR_EVERY == 0 && step > 1 && supervisorEnabled) {
-                try {
-                    String recent = history.length() > 1200
-                            ? history.substring(history.length() - 1200)
-                            : history.toString();
-                    log("🔍 监管者巡检中…");
-                    monitorAdvice = Supervisor.monitor(llm, goal, recent, step);
-                    if (monitorAdvice != null) log(monitorAdvice);
-                    if (monitorAdvice != null && taskLogger != null) {
-                        taskLogger.supervisor(monitorAdvice);
-                    }
-                } catch (Exception ignored) {
-                }
-            }
-            if (localWarn != null) {
-                log(localWarn);
-                history.append("\n").append(localWarn).append("\n");
-            }
-            if (monitorAdvice != null) {
-                history.append("\n").append(monitorAdvice).append("\n");
-            }
+private static String bitmapToJpegB64(android.graphics.Bitmap bmp) {
+try {
+android.graphics.Bitmap use = bmp;
+if (bmp.getWidth() > 720) {
+use = android.graphics.Bitmap.createScaledBitmap(bmp, 720,
+(int) (bmp.getHeight() * 720.0 / bmp.getWidth()), true);
+}
+java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+use.compress(android.graphics.Bitmap.CompressFormat.JPEG, 70, bos);
+return android.util.Base64.encodeToString(bos.toByteArray(),
+android.util.Base64.NO_WRAP);
+} catch (Exception e) {
+return "";
+}
+}
 
-            // 大脑：组 prompt 问模型
-            String prompt = buildPrompt(goal, screen, history.toString(), step,
-                    skillCardsSection(goal), shot != null);
-            log("🤔 第 " + step + " 步思考中..." + (shot != null ? " 👁" : ""));
-            if (taskLogger != null) {
-                taskLogger.stepStart(step);
-                if (shot != null) taskLogger.screenshot();
-            }
-            LlmClient.Result r;
-            if (shot != null) {
-                r = llm.chatVision(prompt, shot, null);
-                try { shot.recycle(); } catch (Exception ignored) {}
-                if (!r.ok) {
-                    // 模型不支持 vision（或调用失败），本任务回退纯文本
-                    log("视觉输入失败，回退纯文本模式");
-                    visionOk = false;
-                    prompt = buildPrompt(goal, screen, history.toString(), step,
-                            skillCardsSection(goal), false);
-                    r = llm.chat(prompt);
-                }
-            } else {
-                r = llm.chat(prompt);
-            }
-            if (!r.ok) {
-                log("大脑请求失败：" + r.text);
-                return false;
-            }
-            JSONObject decision = extractJson(r.text);
-            if (decision == null) {
-                log("模型回复不是合法 JSON，原文前 120 字："
-                        + r.text.substring(0, Math.min(120, r.text.length())));
-                return false;
-            }
-            String think = decision.optString("think", "");
-            if (!think.isEmpty()) {
-                // v2.97：流式输出关闭时不显示中间思考
-                if (streamOutput()) log("💭 " + think);
-            }
-            if (taskLogger != null) {
-                taskLogger.think(think);
-            }
-            String progState = decision.optString("state", "");
-            if (taskLogger != null) {
-                taskLogger.state(progState);
-            }
-            if (!progState.isEmpty()) {
-                if (streamOutput()) log("📍 " + progState);
-            }
-            if (decision.optBoolean("done", false)) {
-                lastHistory = history.toString();
-                // v2.84：done 时把 answer 当最终答复展示
-                String answer = decision.optString("answer", "");
-                if (!answer.isEmpty()) {
-                    log("🤖 " + answer);
-                } else if (!think.isEmpty()) {
-                    log("🤖 " + think);
-                }
-                log("✅ 任务完成");
-                // v2.93：记录任务结束
-                if (taskLogger != null) {
-                    taskLogger.finish(true,
-                            answer.isEmpty() ? think : answer);
-                    log("📝 任务日志已保存");
-                }
-                return true;
-            }
+// ---- 静态工具（MainActivity 等沿用） ----
 
-            // 手：执行动作
-            JSONArray actions = decision.optJSONArray("actions");
-            if (actions == null || actions.length() == 0) {
-                log("模型未给出动作，停止");
-                return false;
-            }
-            TaskRunner runner = new TaskRunner(ctx, listener::onLog);
-            if (riskPolicy != null) runner.setRiskPolicy(riskPolicy);
-            runner.setApprover(approver);
-            runner.setRemote(remote);
-            StringBuilder doneActions = new StringBuilder();
-            for (int i = 0; i < actions.length(); i++) {
-                if (listener != null && listener.isStopped()) {
-                    log("已手动停止");
-                    return false;
-                }
-                JSONObject a;
-                try {
-                    a = actions.getJSONObject(i);
-                } catch (Exception e) {
-                    continue;
-                }
-                String do_ = a.optString("do", "");
-                boolean adv = ALLOWED_ADV.contains(do_);
-                if (!ALLOWED.contains(do_) && !(adv && allowAdvanced)) {
-                    log("⛔ 跳过不允许的动作：" + do_);
-                    continue;
-                }
-                // v2.45 试错：同一子任务内试过且失败的方法直接拦截，不执行
-                String sig = actionSig(a);
-                if (taskPlan.triedFailed(sig)) {
-                    log("⛔ 该方法本子任务已试过且失败，拦截换招：" + sig);
-                    pendingNudge = "你刚才想用的方法（" + sig + "）本子任务已经试过且失败，"
-                            + "被系统拦截了。必须换一种没试过的方法，比如："
-                            + "文本点不到→vision 看坐标→tap 坐标；"
-                            + "打不开应用→确认包名/从桌面找图标；"
-                            + "输入失败→先点输入框聚焦再输。";
-                    break; // 停止本轮剩余动作，下轮重新思考
-                }
-                log("🖐 执行：" + do_ + (adv ? "（高级）" : ""));
-                boolean ok = runner.execOneStep(a.toString());
-                taskPlan.recordTried(sig, ok);
-                if ("launch".equals(do_) && ok) {
-                    String pkg = a.optString("package", "");
-                    if (!pkg.isEmpty()) lastLaunchPkg = pkg;
-                }
-                doneActions.append(do_).append(ok ? "✓" : "✗");
-                // 3. 重复动作检测
-                recentActs.addLast(do_ + ":" + a.optString("text",
-                        a.optString("cmd", "")));
-                while (recentActs.size() > 3) recentActs.removeFirst();
-                if (recentActs.size() == 3) {
-                    String[] arr = recentActs.toArray(new String[0]);
-                    if (arr[0].equals(arr[1]) && arr[1].equals(arr[2])) {
-                        // v2.91：给理由，不只喊停
-                        String repWarn = "【监管者实时提醒】连续 3 次重复同一动作（"
-                                + arr[0] + "）\n"
-                                + "理由：同一动作连做 3 次说明这条路走不通，"
-                                + "屏幕没变化就是没生效\n"
-                                + "建议：换方法（文本点不到→vision 定位坐标→tap 坐标）";
-                        log(repWarn);
-                        history.append("\n").append(repWarn).append("\n");
-                        recentActs.clear();
-                    }
-                }
-                if (ok) lastProgress = System.currentTimeMillis();
-                String out = runner.getLastOutput();
-                if (out != null && !out.isEmpty()) {
-                    doneActions.append("[输出:").append(out).append("]");
-                }
-                // 审计：记录每步动作 + 参数摘要 + 结果
-                try {
-                    JSONObject au = new JSONObject();
-                    au.put("n", step);
-                    au.put("do", do_);
-                    au.put("ok", ok);
-                    au.put("risk", ActionRisk.levelFor(do_).label);
-                    if (out != null && !out.isEmpty()) {
-                        au.put("out", out.length() > 120
-                                ? out.substring(0, 120) + "…" : out);
-                    }
-                    auditSteps.add(au);
-                } catch (Exception ignored) {
-                }
-                doneActions.append(" ");
-                // v2.45：子任务尝试上限，超了标记失败跳过
-                TaskPlan.Subtask cur = taskPlan.currentTask();
-                if (cur != null && cur.attempts >= TaskPlan.MAX_ATTEMPTS
-                        && !taskPlan.allDone()) {
-                    log("❌ 子任务“" + cur.goal + "”已尝试 " + cur.attempts
-                            + " 次未果，标记失败并跳过");
-                    taskPlan.markFailed();
-                    pendingNudge = "上一个子任务多次尝试失败已跳过，继续下一个子任务。";
-                    break;
-                }
-                if (!ok) break; // 动作失败就重新看屏再想，不硬走
-            }
-            // v2.45：子任务完成判定（模型标记 subtask_done / 验证文本出现）
-            TaskPlan.Subtask curT = taskPlan.currentTask();
-            if (curT != null && !taskPlan.allDone()) {
-                boolean modelDone = decision.optBoolean("subtask_done", false);
-                boolean autoDone = !curT.verify.isEmpty()
-                        && screen.contains(curT.verify);
-                if (modelDone || autoDone) {
-                    log("✅ 子任务完成：" + curT.goal
-                            + (autoDone && !modelDone ? "（验证文本已出现）" : ""));
-                    taskPlan.checkpoint(step, screenFingerprint(screen));
-                    taskPlan.markDone();
-                    if (taskPlan.allDone()) {
-                        lastHistory = history.toString();
-                        if (taskPlan.anyFailed()) {
-                            log("⚠ 子任务已全部过完，但有失败项，任务未完全达成");
-                            return false;
-                        }
-                        log("✅ 所有子任务完成，任务达成");
-                        return true;
-                    }
-                }
-            }
-            rounds++;
-            history.append("第").append(step).append("步：想[").append(think)
-                    .append("] 做[").append(doneActions.toString().trim()).append("]\n");
-            history = trimHistory(history);
-            prevDoneActions = doneActions.toString().trim(); // v2.51：供下轮二元组循环检测
-        }
-        lastHistory = history.toString();
-        log("达到最大步数（" + maxSteps + "），停止");
-        return false;
-    }
+/** 控件树序列化：[编号] 文字 (可点) 每行一条 */
+static String serialize(List<AgentAccessibilityService.NodeInfo> nodes) {
+StringBuilder sb = new StringBuilder();
+for (int i = 0; i < nodes.size(); i++) {
+AgentAccessibilityService.NodeInfo n = nodes.get(i);
+String t = n.text.isEmpty()? n.desc: n.text;
+t = t.replace('\n', ' ').trim();
+if (t.isEmpty()) continue;
+if (t.length() > 24) t = t.substring(0, 24);
+sb.append('[').append(i).append("] ").append(t);
+if (n.clickable) sb.append(" (可点)");
+sb.append('\n');
+}
+return sb.toString();
+}
 
-    /** v2.45：构建结构化任务计划（thinker规划 > 旧todo > 规划调用 > 单任务兜底） */
-    private TaskPlan buildTaskPlan(String goal) {
-        TaskPlan p;
-        if (!thinkerPlan.isEmpty()) {
-            p = TaskPlan.fromThinkerText(thinkerPlan);
-        } else if (!todoSteps.isEmpty()) {
-            p = TaskPlan.fromGoals(todoSteps);
-        } else {
-            p = planByLlm(goal);
-            if (p.empty()) p = TaskPlan.single(goal);
-        }
-        if (p.empty()) p = TaskPlan.single(goal);
-        p.start();
-        return p;
-    }
+/** 从模型文本中抠出第一个 JSON 对象（旧通道零散调用沿用） */
+static JSONObject extractJson(String text) {
+if (text == null) return null;
+int a = text.indexOf('{');
+int b = text.lastIndexOf('}');
+if (a < 0 || b <= a) return null;
+try {
+return new JSONObject(text.substring(a, b + 1));
+} catch (Exception e) {
+return null;
+}
+}
 
-    /** v2.45：一次规划调用，把目标拆成带验证标准的子任务 */
-    private TaskPlan planByLlm(String goal) {
-        try {
-            log("📋 规划拆解中（1 次调用）…");
-            String pp = "你是任务规划师。把下面的手机操作任务拆成 2-6 个子任务，"
-                    + "每个子任务一句话目标 goal，外加完成后屏幕上应出现的验证文字 verify"
-                    + "（无明确文字可空字符串）。只输出纯 JSON，不要 markdown 包裹，格式："
-                    + "{\"subtasks\":[{\"goal\":\"打开系统设置\",\"verify\":\"设置\"}]}"
-                    + "\n\n任务：" + goal;
-            LlmClient.Result r = llm.chat(pp);
-            if (!r.ok) {
-                log("规划调用失败，走单任务模式");
-                return new TaskPlan();
-            }
-            JSONObject ej = extractJson(r.text);
-            if (ej == null) return new TaskPlan();
-            return TaskPlan.fromJson(ej.toString());
-        } catch (Exception e) {
-            log("规划异常，走单任务模式");
-            return new TaskPlan();
-        }
-    }
-
-    /** v2.45：动作签名（用于试错去重）：do:关键参数 */
-    private static String actionSig(JSONObject a) {
-        String do_ = a.optString("do", "");
-        if ("swipe".equals(do_)) {
-            // 滑动的身份是 起点->终点
-            return do_ + ":" + noSpace(a.optJSONArray("from"))
-                    + "->" + noSpace(a.optJSONArray("to"));
-        }
-        String key = a.optString("text",
-                a.optString("cmd",
-                        a.optString("question",
-                                a.optString("package",
-                                        a.optString("path", "")))));
-        Object id = a.opt("id");
-        if (key.isEmpty() && id != null) key = String.valueOf(id);
-        return do_ + ":" + key;
-    }
-
-    private static String noSpace(JSONArray arr) {
-        return arr == null ? "" : arr.toString().replace(" ", "");
-    }
-
-    /**
-     * v2.45 自恢复阶梯：L1 返回上一步 → L2 重新进入应用 → L3 回退到检查点。
-     * 返回 false 表示已达恢复上限，调用方应停止任务。
-     */
-    private boolean doRecoveryLadder() {
-        recoveryRounds++;
-        if (recoveryRounds > MAX_RECOVERY_ROUNDS) {
-            log("🛟 自恢复轮数超限（" + MAX_RECOVERY_ROUNDS + "），放弃任务");
-            return false;
-        }
-        recoveryLevel++;
-        TaskRunner runner = new TaskRunner(ctx, listener::onLog);
-        if (riskPolicy != null) runner.setRiskPolicy(riskPolicy);
-        runner.setApprover(approver);
-        runner.setRemote(remote);
-        try {
-            if (recoveryLevel == 1) {
-                log("🛟 自恢复 L1：返回上一步");
-                runner.execOneStep("{\"do\":\"back\"}");
-            } else if (recoveryLevel == 2 && !lastLaunchPkg.isEmpty()) {
-                log("🛟 自恢复 L2：重新进入 " + lastLaunchPkg);
-                runner.execOneStep("{\"do\":\"launch\",\"package\":\""
-                        + lastLaunchPkg.replace("\"", "") + "\"}");
-            } else {
-                if (taskPlan.rollbackToCheckpoint()) {
-                    log("🛟 自恢复 L3：回退到检查点（子任务 "
-                            + (taskPlan.current() + 1) + "）重新尝试");
-                } else {
-                    log("🛟 自恢复 L3：无检查点可回退");
-                }
-                recoveryLevel = 0;
-            }
-        } catch (Exception e) {
-            log("🛟 自恢复执行异常：" + e.getMessage());
-        }
-        return true;
-    }
-
-    /** 构建超时原因说明（给用户看的） */
-    private String buildTimeoutReason(String goal, int step, long elapsed,
-                                      long idle, String history) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("任务「").append(goal.length() > 20
-                ? goal.substring(0, 20) + "…" : goal).append("」");
-        if (elapsed > 5 * 60 * 1000) {
-            sb.append("已运行 ").append(elapsed / 60000).append(" 分钟");
-        } else {
-            sb.append("已 ").append(idle / 1000).append(" 秒没有进展");
-        }
-        sb.append("（当前第 ").append(step).append(" 步）。\n");
-        // 摘最近两步
-        String[] lines = history.split("\n");
-        int n = 0;
-        for (int i = lines.length - 1; i >= 0 && n < 2; i--) {
-            if (!lines[i].trim().isEmpty()) {
-                sb.append("· ").append(lines[i].trim()).append("\n");
-                n++;
-            }
-        }
-        return sb.toString();
-    }
-
-    /** 界面序列化：紧凑文本，一行一个节点，省 token */
-    static String serialize(List<AgentAccessibilityService.NodeInfo> nodes) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < nodes.size(); i++) {
-            AgentAccessibilityService.NodeInfo n = nodes.get(i);
-            String t = n.text.isEmpty() ? n.desc : n.text;
-            t = t.replace('\n', ' ').trim();
-            if (t.isEmpty()) continue;
-            if (t.length() > 24) t = t.substring(0, 24);
-            sb.append('[').append(i).append("] ").append(t);
-            if (n.clickable) sb.append(" (可点)");
-            sb.append('\n');
-        }
-        return sb.toString();
-    }
-
-    private String skillCardsSection(String goal) {
-        try {
-            // 按需注入：只给与目标相关的卡片，省 token
-            String d = new SkillCardStore(ctx).describeForPrompt(goal);
-            if (d.isEmpty()) return "";
-            return "可用技能卡（拿来即用，免重复思考；标注“优先”的用户技能卡优先调用）：\n"
-                    + d + "\n";
-        } catch (Exception e) {
-            return "";
-        }
-    }
-
-    /** prompt 组装（纯逻辑，可独立测试） */
-    String buildPrompt(String goal, String screen, String history, int step,
-                         String cards, boolean hasShot) {
-        StringBuilder p = new StringBuilder();
-        if (hasShot) {
-            // v2.49 AutoGLM 式视觉优先：截图是第一信息源
-            p.append("你是手机自动化助手。本轮附带了当前屏幕截图（已压缩），")
-                    .append("请像人一样先看截图理解界面，控件列表仅作辅助参考；")
-                    .append("截图里能看到但列表里没有的按钮/小字，以截图为准。\n\n");
-        } else {
-            p.append("你是手机自动化助手。你看到的是安卓手机当前界面的控件列表，")
-                    .append("格式为 [编号] 文字 (可点=可点击)。\n\n");
-        }
-        p.append("用户目标：").append(goal).append("\n\n");
-        // v3.09：App 自身功能认知——用户说的是 App 功能时不要去系统设置里找
-        p.append("【App 自身功能】你是「手机Agent」App 里的智能体。")
-                .append("用户提到以下词时，说的是 App 自己的功能，不是手机系统应用，")
-                .append("不要去系统设置里找，直接用 answer 回复说明：\n")
-                .append("- 「任务日志」= 每次任务自动存的详细过程文件（files/task_logs/），"
-                        + "在「我的」页可查看；\n")
-                .append("- 「监管者」= 监督你执行、发现卡住会打断并给理由的模块；\n")
-                .append("- 「技能卡」= 存好的自动化流程（如汽水音乐领时长）；\n")
-                .append("- 「流式输出」= 任务执行时是否实时显示中间思考的开关；\n")
-                .append("- 「远控」「Telegram 机器人」= App 的另外两个使用通道。\n")
-                .append("如果用户是在提 App 功能需求（如「任务日志只在我需要时发」），")
-                .append("用 answer 简短回应「收到，这个需求我记下了」之类，不要编造去改设置。\n\n");
-        if (cards != null && !cards.isEmpty()) {
-            p.append(cards).append("\n");
-        }
-        if (!conversationContext.isEmpty()) {
-            p.append("【对话上下文】本次会话最近的对话，")
-                    .append("你必须利用其中的信息，不要重复询问用户已说过的内容：\n")
-                    .append(conversationContext).append("\n\n");
-        }
-        // v2.85：长期记忆注入
-        String memDesc = UserMemory.describeForPrompt(ctx);
-        if (!memDesc.isEmpty()) {
-            p.append(memDesc);
-        }
-        if (!thinkerPlan.isEmpty()) {
-            p.append("【思考者规划】请按以下计划执行，"
-                    + "如界面与预期不符可灵活调整：\n")
-                    .append(thinkerPlan).append("\n\n");
-        }
-        // v2.45：结构化任务计划（旧 todo 列表仅作兜底）
-        String planDesc = taskPlan.describe();
-        if (!planDesc.isEmpty()) {
-            p.append(planDesc);
-        } else {
-            String todo = todoProgress();
-            if (!todo.isEmpty()) p.append(todo).append("\n");
-        }
-        if (!supervisorFeedback.isEmpty()) {
-            p.append("【监管者反馈】上次执行未被确认完成，继续执行：\n")
-                    .append(supervisorFeedback)
-                    .append("\n不要重复已完成的步骤，针对未完成的部分继续。\n\n");
-        }
-        if (!history.isEmpty()) {
-            p.append("已做过的步骤：\n").append(history).append("\n");
-        }
-        if (!pendingNudge.isEmpty()) {
-            p.append("【系统提醒】").append(pendingNudge).append("\n\n");
-            pendingNudge = "";
-        }
-        p.append("当前界面（第 ").append(step).append(" 步）：\n")
-                .append(screen).append("\n")
-                .append("你每次回复必须是纯 JSON（不要 markdown 包裹），格式：\n")
-                .append("{\"think\":\"思考过程（用人话写）\",\"state\":\"已完成X/下一步Y\",")
-                .append("\"done\":false,")
-                .append("\"actions\":[{\"do\":\"tap_text\",\"text\":\"xxx\"}]}\n\n")
-                .append("可用动作：\n")
-                .append("- tap_text 按文本点 {\"do\":\"tap_text\",\"text\":\"设置\"}\n")
-                .append("- tap_id 按编号点 {\"do\":\"tap_id\",\"id\":3}\n")
-                .append("- vision 看屏问答（图标定位/判断画面）"
-                        + " {\"do\":\"vision\",\"question\":\"快门按钮的坐标是多少？\"}"
-                        + "（问位置会返回屏幕坐标，再用 tap 点）\n")
-                .append("- tap 按坐标点击 {\"do\":\"tap\",\"x\":540,\"y\":2080}\n")
-                .append("- input 输入文本（先点输入框） {\"do\":\"input\",\"text\":\"你好\"}\n")
-                .append("- swipe 滑动 {\"do\":\"swipe\",\"from\":[500,1500],\"to\":[500,500]}\n")
-                .append("- back 返回 {\"do\":\"back\"}\n")
-                .append("- wait_text 等文本出现 {\"do\":\"wait_text\",\"text\":\"xxx\",\"timeout\":10}\n")
-                .append("- launch 启动应用 {\"do\":\"launch\",\"package\":\"包名\"}\n")
-                .append("- sleep 等待 {\"do\":\"sleep\",\"s\":2}\n")
-                .append("- use_card 调用技能卡 {\"do\":\"use_card\",\"id\":\"card_xxx\"}"
-                        + "（能用技能卡就别从零做）\n")
-                .append("- termux 在内置 Termux 里跑命令"
-                        + " {\"do\":\"termux\",\"cmd\":\"python3 /sdcard/a.py\"}"
-                        + "（⭐优先：能用命令行解决的就别点 UI，"
-                        + "比如查信息、算数、处理文件、跑脚本）\n")
-                .append("- search 联网搜索"
-                        + " {\"do\":\"search\",\"query\":\"北京天气\",\"count\":5}"
-                        + "（需要外部信息时先搜，搜完再用结果继续任务）\n")
-                .append("- shell 执行命令（root） {\"do\":\"shell\",\"cmd\":\"ls /sdcard\"}\n")
-                .append("- read_file 读文件 {\"do\":\"read_file\",\"path\":\"/sdcard/a.txt\"}\n")
-                .append("- write_file 写文件 {\"do\":\"write_file\",\"path\":\"/sdcard/a.txt\",\"content\":\"hi\"}\n")
-                .append("- fetch_url 抓网页正文 {\"do\":\"fetch_url\",\"url\":\"https://...\"}\n")
-                .append("- remember 记住用户信息 {\"do\":\"remember\",\"key\":\"喜欢的歌手\",\"value\":\"周杰伦\"}\n")
-                .append("  （用户说了偏好/事实时顺手记住，下次直接用，别再问）\n\n")
-                .append("图标语义（看截图时像人一样认图标，不要当睁眼瞎）：\n")
-                .append("- 放大镜=搜索；齿轮=设置；×=关闭弹窗；←=返回上一页\n")
-                .append("- 房子=首页；人头=我的/个人中心；购物车=购物袋\n")
-                .append("- 三角=播放；喇叭=声音；相机=拍照/扫码\n")
-                .append("- 三个点 ⋮ /三横线 ☰ =更多菜单；＋=新增/添加\n")
-                .append("- 垃圾桶=删除；笔=编辑；星星/爱心=收藏；分享箭头=分享\n")
-                .append("- 图标按钮没有文字时：先用 vision 问出它的坐标，再 tap 点，严禁猜坐标\n\n")
-                .append("做事原则（自己判断，不是死流程）：\n")
-                .append("- 先看明白再动手：截图+列表一起看\n")
-                .append("- 独立动作可一次多个，有依赖的分开\n")
-                .append("- 失败换方法，别死磕；输出前自查参数对不对\n\n")
-                .append("👆 点击智能（核心能力）：\n")
-                .append("- 看到目标先想：这是文字按钮还是图标？\n")
-                .append("- 文字按钮 → 直接 tap_text 点文字\n")
-                .append("- 图标按钮（相机快门、返回箭头等）→ 用 vision 问位置拿坐标 → tap 坐标\n")
-                .append("- 点之前确认目标在当前屏幕上，别点不存在的东西\n")
-                .append("- 点之后看屏幕变化：没变化=没点中，换方法（vision 重新定位）\n")
-                .append("- tap_text 报告\"超时未找到\"时，禁止凭感觉猜坐标点；"
-                        + "必须先用 vision 问出坐标再 tap\n")
-                .append("- 不要连续点同一个位置 3 次以上\n\n")
-                .append("规则：\n")
-                .append("0a. ⭐ 首轮一句话说清目标+怎样算成功\n")
-                .append("0. ⭐ Termux 优先：命令行能搞定的别点屏幕\n")
-                .append("1. 独立动作可一次多个，有依赖的单发\n")
-                .append("2. 失败换方法，别重复\n")
-                .append("3. 做完返回 {\"think\":\"...\",\"state\":\"全部完成\",\"done\":true,\n")
-                .append("\"answer\":\"给用户的最终答复（做了什么/结果如何）\",\"actions\":[]}\n")
-                .append("4. 只输出 JSON\n");
-        return p.toString();
-    }
-
-    /** 只保留最近 HISTORY_KEEP 轮历史：最近 2 轮完整，更早的只留动作摘要（省 token） */
-    static StringBuilder trimHistory(StringBuilder h) {
-        String[] lines = h.toString().split("\n");
-        if (lines.length <= HISTORY_KEEP) return h;
-        StringBuilder out = new StringBuilder();
-        int start = lines.length - HISTORY_KEEP;
-        for (int i = start; i < lines.length; i++) {
-            String line = lines[i];
-            if (i < lines.length - 2) line = compressHistoryLine(line);
-            out.append(line).append('\n');
-        }
-        return out;
-    }
-
-    /**
-     * 老历史行压缩：保留「做[动作摘要]」完整，「想[思考]」截断到 40 字。
-     * 格式：第N步：想[...] 做[...]
-     */
-    static String compressHistoryLine(String line) {
-        int zi = line.indexOf("想[");
-        int zo = line.indexOf("] 做[", zi);
-        if (zi < 0 || zo < 0) return line;
-        String think = line.substring(zi + 2, zo);
-        if (think.length() > 40) think = think.substring(0, 40) + "…";
-        return line.substring(0, zi + 2) + think + line.substring(zo);
-    }
-
-    /** 从模型回复中提取 JSON（容忍 markdown 包裹） */
-    static JSONObject extractJson(String text) {
-        if (text == null) return null;
-        String t = text.trim();
-        // 去 markdown 代码块
-        if (t.startsWith("```")) {
-            int s = t.indexOf('\n');
-            int e = t.lastIndexOf("```");
-            if (s > 0 && e > s) t = t.substring(s + 1, e).trim();
-        }
-        int a = t.indexOf('{'), b = t.lastIndexOf('}');
-        if (a < 0 || b <= a) return null;
-        try {
-            return new JSONObject(t.substring(a, b + 1));
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    private static void sleepQuiet(long ms) {
-        try {
-            Thread.sleep(ms);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
+private static void sleepQuiet(long ms) {
+try {
+Thread.sleep(ms);
+} catch (InterruptedException e) {
+Thread.currentThread().interrupt();
+}
+}
 }
