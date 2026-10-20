@@ -29,6 +29,8 @@ public class TaskRunLogger {
         File dir = new File(ctx.getFilesDir(), "task_logs");
         // noinspection ResultOfMethodCallIgnored
         dir.mkdirs();
+        // v3.11 Issue 7：每次建日志时顺手清理过期文件
+        cleanupOldLogs(ctx);
         logFile = new File(dir, name);
         String startTs = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss",
                 Locale.getDefault()).format(new Date());
@@ -110,5 +112,47 @@ public class TaskRunLogger {
         if (files == null) return new File[0];
         java.util.Arrays.sort(files, (a, b) -> b.getName().compareTo(a.getName()));
         return files;
+    }
+
+    /**
+     * v3.11 Issue 7：清理过期日志。
+     * 保留策略：默认保留最近 30 天，可在"agent"配置里改 log_keep_days。
+     * 同时限制总数 200，超了删最老的。
+     */
+    public static void cleanupOldLogs(Context ctx) {
+        try {
+            int keepDays = ctx.getSharedPreferences("agent",
+                    Context.MODE_PRIVATE).getInt("log_keep_days", 30);
+            if (keepDays <= 0) return;
+            File dir = new File(ctx.getFilesDir(), "task_logs");
+            File[] files = dir.listFiles();
+            if (files == null) return;
+            long cutoff = System.currentTimeMillis()
+                    - (long) keepDays * 24 * 3600 * 1000;
+            java.util.Arrays.sort(files,
+                    (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+            int alive = files.length;
+            for (File f : files) {
+                if (f.lastModified() < cutoff || alive > 200) {
+                    // noinspection ResultOfMethodCallIgnored
+                    if (f.delete()) alive--;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** v3.11 Issue 7：日志目录总大小（字节） */
+    public static long getLogDirSize(Context ctx) {
+        long size = 0;
+        try {
+            File dir = new File(ctx.getFilesDir(), "task_logs");
+            File[] files = dir.listFiles();
+            if (files != null) {
+                for (File f : files) size += f.length();
+            }
+        } catch (Exception ignored) {
+        }
+        return size;
     }
 }

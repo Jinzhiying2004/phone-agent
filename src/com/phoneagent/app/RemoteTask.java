@@ -29,6 +29,8 @@ public class RemoteTask {
     public volatile boolean done = false;
     public volatile boolean ok = false;
     public volatile String error = "";
+    /** v3.21：远程停止请求（/task/stop 置位，AgentLoop 每轮检查） */
+    public volatile boolean stopRequested = false;
     public volatile JSONArray audit = null;
 
     public RemoteTask(String goal, int maxSteps) {

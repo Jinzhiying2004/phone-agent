@@ -120,6 +120,109 @@ public class SkillCardStore {
         return true;
     }
 
+    /**
+     * v3.12 Issue 12：导出单张卡为可分享 JSON。
+     * 格式：{"skill_card":1,"name":...,"type":...,"trigger":...,"content":...,"summary":...}
+     */
+    public synchronized String exportJson(String id) {
+        Card c = get(id);
+        if (c == null) return null;
+        try {
+            JSONObject o = new JSONObject();
+            o.put("skill_card", 1);
+            o.put("name", c.name);
+            o.put("type", c.type);
+            o.put("trigger", c.trigger);
+            o.put("content", c.content);
+            o.put("summary", c.summary);
+            return o.toString(2);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * v3.12 Issue 12：校验导入的 JSON。
+     * 返回 null 表示通过，否则返回错误原因。
+     * 检查：结构完整 + content 可解析 + 风险动作提示。
+     */
+    public static String validateImport(JSONObject o) {
+        if (o == null) return "不是合法 JSON";
+        if (o.optInt("skill_card", 0) != 1 && !o.has("name")) {
+            return "缺少 skill_card 标记或 name 字段，可能不是技能卡 JSON";
+        }
+        String name = o.optString("name", "").trim();
+        if (name.isEmpty()) return "name 为空";
+        String type = o.optString("type", "skill");
+        if (!TYPE_SKILL.equals(type) && !TYPE_SCRIPT.equals(type)) {
+            return "type 非法（应为 skill/script）： " + type;
+        }
+        String content = o.optString("content", "");
+        if (content.isEmpty()) return "content 为空";
+        // content 结构检查
+        try {
+            if (TYPE_SKILL.equals(type)) {
+                // skill 类：content 应为 {"steps":[...]} 或步骤数组
+                String t = content.trim();
+                if (t.startsWith("{")) {
+                    JSONObject cj = new JSONObject(t);
+                    if (!cj.has("steps")) return "skill 卡的 content 缺少 steps";
+                } else if (t.startsWith("[")) {
+                    new JSONArray(t);
+                } else {
+                    return "skill 卡的 content 不是 JSON 对象/数组";
+                }
+            }
+        } catch (Exception e) {
+            return "content 解析失败：" + e.getMessage();
+        }
+        return null; // 通过
+    }
+
+    /**
+     * v3.12 Issue 12：扫描高风险动作，返回警告文本（无风险返回空串）。
+     */
+    public static String scanRisk(String type, String content) {
+        StringBuilder warn = new StringBuilder();
+        try {
+            String t = content == null ? "" : content.toLowerCase();
+            // 危险关键词
+            String[] risky = {"\"shell\"", "\"do\":\"shell\"", "rm -rf", "pm uninstall",
+                    "am force-stop", "reboot", "format", "dd if="};
+            for (String k : risky) {
+                if (t.contains(k)) {
+                    warn.append("含高风险内容：").append(k).append("；");
+                    break;
+                }
+            }
+            // 统计步骤数
+            if (TYPE_SKILL.equals(type)) {
+                String tc = content.trim();
+                int n = 0;
+                if (tc.startsWith("{")) {
+                    n = new JSONObject(tc).optJSONArray("steps").length();
+                } else if (tc.startsWith("[")) {
+                    n = new JSONArray(tc).length();
+                }
+                if (n > 30) warn.append("步骤过多（").append(n).append("步）；");
+            }
+        } catch (Exception ignored) {
+        }
+        return warn.toString();
+    }
+
+    /**
+     * v3.12 Issue 12：从已校验的 JSON 导入，返回新卡 id。
+     */
+    public synchronized String importValidated(JSONObject o) {
+        String name = o.optString("name", "未命名技能");
+        String type = o.optString("type", TYPE_SKILL);
+        String trigger = o.optString("trigger", "");
+        String content = o.optString("content", "");
+        String summary = o.optString("summary", "导入的技能卡");
+        return add(name, type, SRC_USER, trigger, content, summary);
+    }
+
     public synchronized boolean delete(String id) {
         for (int i = 0; i < cards.size(); i++) {
             if (cards.get(i).id.equals(id)) {

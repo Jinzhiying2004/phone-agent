@@ -13,7 +13,9 @@ import java.util.UUID;
 
 /**
  * 定时任务存储（OpenClaw / Hermes cron 思想的零 token 本地版）。
- * 类型：daily（每天 HH:mm）/ interval（每 N 分钟）。由 AgentService 的
+ * v3.12 Issue 13：类型扩展为 daily / interval / weekly（周几+时刻）
+ *      / once（一次性）。覆盖 cron 常用表达。
+ * 由 AgentService 的
  * 调度循环每分钟检查执行，需要远程控制服务保持运行。
  */
 public class ScheduleStore {
@@ -22,9 +24,11 @@ public class ScheduleStore {
         public String id;
         public String skillId;
         public String skillName;
-        public String type; // "daily" | "interval"
-        public int hour, minute; // daily
+        public String type; // "daily" | "interval" | "weekly" | "once"
+        public int hour, minute; // daily / weekly
         public int everyMin;     // interval
+        public String weekdays;  // weekly: "2,3,4,5,6" (Calendar.DAY_OF_WEEK, 1=周日)
+        public long onceAt;      // once: 目标时间 millis
         public boolean enabled = true;
         public long lastRun;
     }
@@ -49,6 +53,8 @@ public class ScheduleStore {
                 s.hour = o.optInt("hour", 8);
                 s.minute = o.optInt("minute", 0);
                 s.everyMin = o.optInt("everyMin", 60);
+                s.weekdays = o.optString("weekdays", "");
+                s.onceAt = o.optLong("onceAt", 0);
                 s.enabled = o.optBoolean("enabled", true);
                 s.lastRun = o.optLong("lastRun", 0);
                 out.add(s);
@@ -126,6 +132,23 @@ public class ScheduleStore {
             if ("daily".equals(s.type)) {
                 boolean passed = h > s.hour || (h == s.hour && m >= s.minute);
                 if (passed && s.lastRun < dayStart) out.add(s);
+            } else if ("weekly".equals(s.type)) {
+                int dow = c.get(Calendar.DAY_OF_WEEK);
+                boolean dayMatch = false;
+                if (s.weekdays != null) {
+                    for (String w : s.weekdays.split(",")) {
+                        if (w.trim().equals(String.valueOf(dow))) {
+                            dayMatch = true;
+                            break;
+                        }
+                    }
+                }
+                boolean passed = h > s.hour || (h == s.hour && m >= s.minute);
+                if (dayMatch && passed && s.lastRun < dayStart) out.add(s);
+            } else if ("once".equals(s.type)) {
+                if (s.onceAt > 0 && now >= s.onceAt && s.lastRun < s.onceAt) {
+                    out.add(s);
+                }
             } else {
                 if (s.everyMin > 0 && now - s.lastRun >= s.everyMin * 60_000L) out.add(s);
             }
@@ -134,9 +157,31 @@ public class ScheduleStore {
     }
 
     public String describe(Schedule s) {
-        String when = "daily".equals(s.type)
-                ? String.format("每天 %02d:%02d", s.hour, s.minute)
-                : ("每 " + s.everyMin + " 分钟");
+        String when;
+        if ("daily".equals(s.type)) {
+            when = String.format("每天 %02d:%02d", s.hour, s.minute);
+        } else if ("weekly".equals(s.type)) {
+            String[] names = {"", "日", "一", "二", "三", "四", "五", "六"};
+            StringBuilder wb = new StringBuilder("每周");
+            if (s.weekdays != null) {
+                for (String w : s.weekdays.split(",")) {
+                    try {
+                        int d = Integer.parseInt(w.trim());
+                        if (d >= 1 && d <= 7) wb.append(names[d]);
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+            when = wb.toString()
+                    + String.format(" %02d:%02d", s.hour, s.minute);
+        } else if ("once".equals(s.type)) {
+            java.text.SimpleDateFormat f =
+                    new java.text.SimpleDateFormat("MM-dd HH:mm",
+                            java.util.Locale.getDefault());
+            when = "一次性 " + f.format(new java.util.Date(s.onceAt));
+        } else {
+            when = "每 " + s.everyMin + " 分钟";
+        }
         return when + " → " + s.skillName;
     }
 
@@ -149,6 +194,8 @@ public class ScheduleStore {
                 .put("hour", s.hour)
                 .put("minute", s.minute)
                 .put("everyMin", s.everyMin)
+                .put("weekdays", s.weekdays == null ? "" : s.weekdays)
+                .put("onceAt", s.onceAt)
                 .put("enabled", s.enabled)
                 .put("lastRun", s.lastRun);
     }

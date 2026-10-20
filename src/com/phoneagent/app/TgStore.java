@@ -1,27 +1,27 @@
 package com.phoneagent.app;
 
 import android.content.Context;
-import android.content.SharedPreferences;
 
 /**
  * Telegram Bot 配置存储（App 私有 SharedPreferences）。
  * token 只存本地、只发往 api.telegram.org，界面脱敏显示，绝不打日志。
  * owner 为绑定的主人 chatId（/start 首次绑定），只接受主人的指令。
+ * v3.13 Issue 2：token 改走 Keystore 加密存储。
  */
 public class TgStore {
 
-    private final SharedPreferences pref;
+    private final SecurePrefs pref;
 
     public TgStore(Context ctx) {
-        pref = ctx.getSharedPreferences("tgbot", Context.MODE_PRIVATE);
+        pref = new SecurePrefs(ctx, "tgbot");
     }
 
     public void saveToken(String token) {
-        pref.edit().putString("token", token == null ? "" : token.trim()).apply();
+        pref.putSecure("token", token == null ? "" : token.trim());
     }
 
     public String getToken() {
-        return pref.getString("token", "");
+        return pref.getSecure("token", "");
     }
 
     public boolean hasToken() {
@@ -43,10 +43,10 @@ public class TgStore {
     }
 
     public void bindOwner(long chatId) {
-        pref.edit().putLong("owner", chatId).apply();
+        pref.putLong("owner", chatId);
     }
 
     public void unbindOwner() {
-        pref.edit().remove("owner").apply();
+        pref.remove("owner");
     }
 }

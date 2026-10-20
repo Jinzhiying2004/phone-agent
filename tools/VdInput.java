@@ -10,6 +10,7 @@ import java.lang.reflect.Method;
  *   VdInput tap <displayId> <x> <y>
  *   VdInput swipe <displayId> <x1> <y1> <x2> <y2> <durationMs>
  *   VdInput key <displayId> <keyCode>
+ *   VdInput input <displayId> <base64文本>  (写剪贴板 + Ctrl+V 粘贴，支持中文)
  * 必须以 root 运行：CLASSPATH=... app_process /system/bin VdInput ...
  */
 public class VdInput {
@@ -44,6 +45,11 @@ public class VdInput {
         } else if ("key".equals(cmd)) {
             int keyCode = Integer.parseInt(args[2]);
             key(displayId, keyCode);
+        } else if ("input".equals(cmd)) {
+            String text = new String(
+                    android.util.Base64.decode(args[2],
+                            android.util.Base64.DEFAULT), "UTF-8");
+            input(displayId, text);
         } else {
             System.out.println("未知命令: " + cmd);
         }
@@ -120,5 +126,52 @@ public class VdInput {
         boolean r2 = (Boolean) inject.invoke(im, up, 0);
         System.out.println("key display=" + displayId
                 + " keyCode=" + keyCode + " down=" + r1 + " up=" + r2);
+    }
+
+    /**
+     * v3.14：虚拟屏文本输入。先写系统剪贴板，再注入 Ctrl+V。
+     * KeyEvent 无法直接表达中文字符，走剪贴板可绕过该限制。
+     * 调用前确保目标输入框已聚焦（先 vd_tap 点它）。
+     */
+    private static void input(int displayId, String text) throws Exception {
+        // 1. 写剪贴板（经 clipboard binder，root 身份）
+        Class<?> smClass = Class.forName("android.os.ServiceManager");
+        Object binder = smClass.getMethod("getService", String.class)
+                .invoke(null, "clipboard");
+        Class<?> stubClass =
+                Class.forName("android.content.IClipboard$Stub");
+        Object clipboard = stubClass.getMethod("asInterface",
+                android.os.IBinder.class).invoke(null, binder);
+        android.content.ClipData clip =
+                android.content.ClipData.newPlainText("vd", text);
+        clipboard.getClass().getMethod("setPrimaryClip",
+                android.content.ClipData.class, String.class, int.class)
+                .invoke(clipboard, clip, "com.android.shell", 0);
+
+        // 2. 注入 Ctrl+V（带 META_CTRL_ON，目标 displayId）
+        long now = android.os.SystemClock.uptimeMillis();
+        KeyEvent ctrlDown = new KeyEvent(now, now, KeyEvent.ACTION_DOWN,
+                KeyEvent.KEYCODE_CTRL_LEFT, 0, KeyEvent.META_CTRL_ON);
+        KeyEvent vDown = new KeyEvent(now, now, KeyEvent.ACTION_DOWN,
+                KeyEvent.KEYCODE_V, 0, KeyEvent.META_CTRL_ON);
+        KeyEvent vUp = new KeyEvent(now, now + 30, KeyEvent.ACTION_UP,
+                KeyEvent.KEYCODE_V, 0, KeyEvent.META_CTRL_ON);
+        KeyEvent ctrlUp = new KeyEvent(now, now + 60, KeyEvent.ACTION_UP,
+                KeyEvent.KEYCODE_CTRL_LEFT, 0);
+        try {
+            Method setDidKey = KeyEvent.class.getMethod("setDisplayId",
+                    int.class);
+            setDidKey.invoke(ctrlDown, displayId);
+            setDidKey.invoke(vDown, displayId);
+            setDidKey.invoke(vUp, displayId);
+            setDidKey.invoke(ctrlUp, displayId);
+        } catch (Exception ignored) {}
+        boolean r1 = (Boolean) inject.invoke(im, ctrlDown, 0);
+        boolean r2 = (Boolean) inject.invoke(im, vDown, 0);
+        Thread.sleep(30);
+        boolean r3 = (Boolean) inject.invoke(im, vUp, 0);
+        boolean r4 = (Boolean) inject.invoke(im, ctrlUp, 0);
+        System.out.println("input display=" + displayId + " len=" + text.length()
+                + " paste=" + (r1 && r2 && r3 && r4));
     }
 }

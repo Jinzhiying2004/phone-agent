@@ -155,6 +155,19 @@ def main():
         "sha256": dex_sha,
         "classes": [rel for _, rel in changed],
     }
+    # v3.13 Issue 3：RSA 签名（私钥离线保管，缺失则拒绝打包）
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "patch_sign", os.path.join(ROOT, "tools", "patch_sign.py"))
+        ps = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ps)
+        meta["sig"] = ps.sign(tag, dex_sha)
+        print("补丁签名完成")
+    except Exception as e:
+        print(f"签名失败（{e}），拒绝打包：热补丁必须签名")
+        shutil.rmtree(tmp, ignore_errors=True)
+        sys.exit(1)
     out_dir = os.path.join(ROOT, "patches")
     os.makedirs(out_dir, exist_ok=True)
     out_zip = os.path.join(out_dir, f"patch-{app_code}-{tag}.zip")
