@@ -35,6 +35,10 @@ public class TaskRunner {
     private Approver approver = null;
     private boolean remote = false;
     private ActionRisk.Policy riskPolicy = null;
+    // v3.10 Issue 4：远程高危动作策略（deny=一律拒绝，allow_log=允许但记录）
+    private String remoteRiskPolicy = "deny";
+    // v3.14：虚拟屏模式——主屏动作透明路由到 vd_*，用户主屏不受打扰
+    private boolean vdMode = false;
 
     public TaskRunner(Context ctx, Listener listener) {
         this.ctx = ctx.getApplicationContext();
@@ -50,6 +54,225 @@ public class TaskRunner {
     /** 标记是否为远程（HTTP / Telegram）进来的任务：无审批人时 ASK 策略直接拦截 */
     public void setRemote(boolean remote) {
         this.remote = remote;
+    }
+
+    /** v3.10 Issue 4：设置远程高危动作策略 */
+    public void setRemoteRiskPolicy(String policy) {
+        this.remoteRiskPolicy = policy;
+    }
+
+    /** v3.14：设置虚拟屏模式（AgentLoop 在任务开始时根据配置调用） */
+    public void setVdMode(boolean vdMode) {
+        this.vdMode = vdMode;
+    }
+
+    public boolean isVdMode() {
+        return vdMode;
+    }
+
+    /**
+     * v3.14：虚拟屏透明改写。tap/swipe/back/launch/input → vd_*；
+     * tap_text → 视觉定位 + vd_tap；其余（shell/termux/sleep 等）直通。
+     * 返回 null 表示改写失败（调用方直接返回 false）。
+     */
+    private JSONObject rewriteForVd(JSONObject st) throws Exception {
+        String do_ = st.getString("do");
+        switch (do_) {
+            case "tap": {
+                JSONObject o = new JSONObject();
+                o.put("do", "vd_tap");
+                o.put("x", st.optDouble("x", 0));
+                o.put("y", st.optDouble("y", 0));
+                return o;
+            }
+            case "swipe": {
+                JSONArray f = st.getJSONArray("from"), t = st.getJSONArray("to");
+                JSONObject o = new JSONObject();
+                o.put("do", "vd_swipe");
+                o.put("x1", f.getInt(0));
+                o.put("y1", f.getInt(1));
+                o.put("x2", t.getInt(0));
+                o.put("y2", t.getInt(1));
+                o.put("duration", st.optInt("ms", 400));
+                return o;
+            }
+            case "back": {
+                JSONObject o = new JSONObject();
+                o.put("do", "vd_key");
+                o.put("keycode", 4);
+                return o;
+            }
+            case "home": {
+                JSONObject o = new JSONObject();
+                o.put("do", "vd_key");
+                o.put("keycode", 3);
+                return o;
+            }
+            case "launch": {
+                JSONObject o = new JSONObject();
+                o.put("do", "vd_launch");
+                o.put("package", st.getString("package"));
+                return o;
+            }
+            case "input": {
+                JSONObject o = new JSONObject();
+                o.put("do", "vd_input");
+                o.put("text", st.getString("text"));
+                return o;
+            }
+            case "tap_text": {
+                return vdTapText(st.optString("text", ""));
+            }
+            default:
+                return st;
+        }
+    }
+
+    /** v3.14：虚拟屏 tap_text——视觉问坐标再 vd_tap */
+    private JSONObject vdTapText(String text) throws Exception {
+        if (text.isEmpty()) {
+            log("tap_text 缺少 text 参数");
+            return null;
+        }
+        android.graphics.Bitmap bmp = VirtualDisplayManager.screenshot();
+        if (bmp == null) {
+            log("虚拟屏截屏失败，无法定位文字");
+            return null;
+        }
+        log("虚拟屏找字: " + text);
+        // v3.21：归一化定位（0-1000），避免模型直接估算像素的缩放误差
+        int[] xy = visionLocate(text, bmp);
+        if (xy == null) {
+            log("虚拟屏定位失败: " + text);
+            return null;
+        }
+        JSONObject o = new JSONObject();
+        o.put("do", "vd_tap");
+        o.put("x", xy[0]);
+        o.put("y", xy[1]);
+        return o;
+    }
+
+    /**
+     * v3.21：归一化视觉定位。让模型以 0-1000 归一化坐标回答中心点，
+     * 再换算成像素。直接问像素坐标时模型常因缩放估算偏差点不中
+     * （如把 y=965 估成 1030，小按钮就点空）。
+     * 返回 {x_px, y_px}，失败返回 null。
+     */
+    private int[] visionLocate(String text,
+                               android.graphics.Bitmap bmp) {
+        String q = "找出界面上文字为「" + text + "」的可点击元素，"
+                + "以 0-1000 归一化坐标回答它的中心点"
+                + "（左上角为 (0,0)，右下角为 (1000,1000)），"
+                + "只回答 JSON {\"x\": 数字, \"y\": 数字}，不要解释。";
+        String ans = visionAsk(q, bmp);
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("\"x\"\\s*:\\s*(\\d+)[^0-9\"']*\"y\"\\s*:\\s*(\\d+)")
+                .matcher(ans);
+        if (!m.find()) {
+            // 兼容模型返回 (x, y) 格式
+            m = java.util.regex.Pattern
+                    .compile("\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*\\)")
+                    .matcher(ans);
+            if (!m.find()) return null;
+        }
+        int nx = Integer.parseInt(m.group(1));
+        int ny = Integer.parseInt(m.group(2));
+        int w = bmp.getWidth(), h = bmp.getHeight();
+        // 归一化转像素；任一值>1000 说明模型直接给了像素，整体按像素钳制
+        int px, py;
+        if (nx <= 1000 && ny <= 1000) {
+            px = nx * w / 1000;
+            py = ny * h / 1000;
+        } else {
+            px = Math.min(nx, w - 1);
+            py = Math.min(ny, h - 1);
+        }
+        log("虚拟屏定位 " + text + ": 归一化(" + nx + "," + ny
+                + ") → 像素(" + px + "," + py + ")");
+        return new int[]{px, py};
+    }
+
+    /** v3.14：虚拟屏 wait_text——轮询视觉判断（最多 6 次，间隔 3 秒） */
+    private boolean vdWaitText(String kw, int timeoutSec) {
+        log("虚拟屏等待文本: " + kw);
+        long end = System.currentTimeMillis() + timeoutSec * 1000L;
+        int polls = 0;
+        while (System.currentTimeMillis() < end && polls < 6) {
+            polls++;
+            android.graphics.Bitmap bmp = VirtualDisplayManager.screenshot();
+            if (bmp != null) {
+                String ans = visionAsk(
+                        "界面上是否出现了文字「" + kw + "」？只回答 yes 或 no。",
+                        bmp);
+                if (ans.trim().toLowerCase().startsWith("yes")) {
+                    log("虚拟屏等到文本: " + kw);
+                    return true;
+                }
+            }
+            try {
+                Thread.sleep(3000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        log("虚拟屏等待超时: " + kw);
+        return false;
+    }
+
+    /** v3.14：虚拟屏 assert_text——单次视觉判断 */
+    private boolean vdAssertText(String kw) {
+        android.graphics.Bitmap bmp = VirtualDisplayManager.screenshot();
+        if (bmp == null) return false;
+        String ans = visionAsk(
+                "界面上是否出现了文字「" + kw + "」？只回答 yes 或 no。", bmp);
+        boolean ok = ans.trim().toLowerCase().startsWith("yes");
+        log("虚拟屏断言 " + kw + ": " + (ok ? "通过" : "失败"));
+        return ok;
+    }
+
+    /**
+     * v3.14：虚拟屏视觉问答（复用 vision 动作的模型优先级：
+     * 辅助视觉模型 > 主力视觉模型 > 主力模型）。
+     * v3.17：辅助模型调用失败时自动降级用主力模型（baseUrl 配错等场景）。
+     */
+    private String visionAsk(String question,
+                             android.graphics.Bitmap bmp) {
+        // v3.21：统一要求归一化坐标，避免像素估算偏差
+        String q = question + "\n\n（如需回答位置，请用 0-1000 归一化坐标，"
+                + "左上角为原点；不要估算像素值。）";
+        // 1) 辅助视觉模型
+        try {
+            AuxModelStore aux = new AuxModelStore(ctx);
+            AuxModelStore.AuxModel vm = aux.getVisionModel();
+            if (vm != null && !vm.apiKey.isEmpty() && !vm.baseUrl.isEmpty()) {
+                LlmClient vc = new LlmClient(vm.baseUrl, vm.apiKey, vm.model);
+                LlmClient.Result vr = vc.chatVision(q, bmp, vm.model);
+                if (vr.ok) return vr.text;
+                log("辅助视觉模型失败，降级用主力模型: "
+                        + truncate(vr.text, 60));
+            }
+        } catch (Exception e) {
+            log("辅助视觉模型异常，降级用主力模型");
+        }
+        // 2) 主力模型兜底
+        try {
+            LlmStore ls = new LlmStore(ctx);
+            if (!ls.hasKey()) {
+                log("虚拟屏视觉：未配置模型");
+                return "";
+            }
+            String vBase = ls.getBaseUrl();
+            String vKey = ls.getApiKeyRaw();
+            String vModel = ls.getVisionModel();
+            if (vModel.isEmpty()) vModel = ls.getModel();
+            LlmClient vc = new LlmClient(vBase, vKey, vModel);
+            LlmClient.Result vr = vc.chatVision(q, bmp, vModel);
+            return vr.ok ? vr.text : "";
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     public void setRiskPolicy(ActionRisk.Policy policy) {
@@ -116,29 +339,66 @@ public class TaskRunner {
         return new java.io.File(c.getFilesDir(), "vdinput.dex").getAbsolutePath();
     }
 
+    /** 纯 ASCII 文本（适合 input text） */
+    private boolean isAsciiText(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < 32 || c > 126) return false;
+        }
+        return true;
+    }
+
+    /** 主屏 root 输入中文：剪贴板 + Ctrl+V 粘贴（VdInput 在 display 0 注入） */
+    private boolean rootPasteMainScreen(String text) {
+        if (!ensureVdDex(ctx)) return false;
+        try {
+            String b64 = android.util.Base64.encodeToString(
+                    text.getBytes("UTF-8"), android.util.Base64.NO_WRAP);
+            String out = rootCmdOut("CLASSPATH=" + vdDexPath(ctx)
+                    + " app_process /system/bin VdInput input 0 " + b64 + " 2>&1");
+            log("root 输入(粘贴): " + out.trim());
+            return out.contains("paste=true");
+        } catch (Exception e) {
+            log("root 输入异常: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /** 仅释放 vdinput.dex（不要求虚拟屏已创建，主屏也用得上） */
+    private boolean ensureVdDex(android.content.Context c) {
+        java.io.File dex = new java.io.File(c.getFilesDir(), "vdinput.dex");
+        int curVer = c.getSharedPreferences("agent",
+                android.content.Context.MODE_PRIVATE).getInt("vd_dex_ver", 0);
+        if (dex.exists() && curVer == VD_DEX_VER) return true;
+        try {
+            java.io.InputStream in = c.getAssets().open("vdinput.dex");
+            java.io.FileOutputStream out = new java.io.FileOutputStream(dex);
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            in.close();
+            out.close();
+            c.getSharedPreferences("agent",
+                    android.content.Context.MODE_PRIVATE).edit()
+                    .putInt("vd_dex_ver", VD_DEX_VER).apply();
+            log("VdInput dex 已释放");
+        } catch (Exception e) {
+            log("dex 释放失败: " + e.getMessage());
+            return false;
+        }
+        return true;
+    }
+
+    /** VdInput dex 版本：改 tools/VdInput.java 后 +1，触发重新释放 */
+    private static final int VD_DEX_VER = 2;
+
     /** 确保 VdInput dex 已从 assets 拷贝 */
     private boolean ensureVdInput(android.content.Context c) {
         if (!VirtualDisplayManager.isActive()) {
             log("虚拟屏未创建，先 vd_create");
             return false;
         }
-        java.io.File dex = new java.io.File(c.getFilesDir(), "vdinput.dex");
-        if (!dex.exists()) {
-            try {
-                java.io.InputStream in = c.getAssets().open("vdinput.dex");
-                java.io.FileOutputStream out = new java.io.FileOutputStream(dex);
-                byte[] buf = new byte[8192];
-                int n;
-                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-                in.close();
-                out.close();
-                log("VdInput dex 已释放");
-            } catch (Exception e) {
-                log("dex 释放失败: " + e.getMessage());
-                return false;
-            }
-        }
-        return true;
+        return ensureVdDex(c);
     }
 
     /** 取 App 的启动 Activity 类名 */
@@ -302,6 +562,11 @@ public class TaskRunner {
             return ok;
         }
         if (remote) {
+            // v3.10 Issue 4：远程策略可配置
+            if ("allow_log".equals(remoteRiskPolicy)) {
+                log("⚠️ 远程高危动作按策略放行（已记录）：" + do_);
+                return true;
+            }
             log("⛔ 远程任务无审批人，拦截" + lv.label + "动作：" + do_);
             return false;
         }
@@ -311,6 +576,19 @@ public class TaskRunner {
 
     private boolean runStep(JSONObject st, JSONObject params, int depth) throws Exception {
         String do_ = st.getString("do");
+        // v3.14：虚拟屏模式——主屏动作透明改写为 vd_*（LLM 无需感知）
+        if (vdMode && VirtualDisplayManager.isActive()) {
+            if ("wait_text".equals(do_)) {
+                return vdWaitText(st.optString("text", ""),
+                        st.optInt("timeout", 15));
+            }
+            if ("assert_text".equals(do_)) {
+                return vdAssertText(st.optString("text", ""));
+            }
+            st = rewriteForVd(st);
+            if (st == null) return false;
+            do_ = st.getString("do");
+        }
         // ---- 风险门：编译期分级 + 用户三档策略（策略在代码里，不在 prompt 里） ----
         if (!riskGate(do_, st)) return false;
         switch (do_) {
@@ -379,9 +657,20 @@ public class TaskRunner {
             case "input": {
                 String s = st.getString("text");
                 log("输入: " + s);
-                if (AgentAccessibilityService.setText(s)) return true;
-                log("无障碍输入失败，尝试 root（仅英文）");
-                return rootCmd("input text " + s.replace(" ", "%s").replace("'", ""));
+                // v3.28：通道优先级 root > 无障碍。root 分两路：
+                // 纯 ASCII 走 input text；含中文走剪贴板粘贴（主屏 display 0）
+                if (hasRoot()) {
+                    boolean ok;
+                    if (isAsciiText(s)) {
+                        ok = rootCmd("input text " + s.replace(" ", "%s")
+                                .replace("'", "").replace("\"", ""));
+                    } else {
+                        ok = rootPasteMainScreen(s);
+                    }
+                    if (ok) return true;
+                    log("root 输入失败，回退无障碍");
+                }
+                return AgentAccessibilityService.setText(s);
             }
             case "swipe": {
                 JSONArray f = st.getJSONArray("from"), t = st.getJSONArray("to");
@@ -406,6 +695,20 @@ public class TaskRunner {
                     if (rootCmd("input keyevent 4")) return true;
                 }
                 return AgentAccessibilityService.goBack();
+            }
+            case "home": {
+                // 回到桌面（KEYCODE_HOME=3）
+                if (hasRoot()) return rootCmd("input keyevent 3");
+                try {
+                    android.content.Intent i = new android.content.Intent(
+                            android.content.Intent.ACTION_MAIN);
+                    i.addCategory(android.content.Intent.CATEGORY_HOME);
+                    i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                    ctx.startActivity(i);
+                    return true;
+                } catch (Exception e) {
+                    return false;
+                }
             }
             case "shell": {
                 String cmd = st.getString("cmd");
@@ -558,46 +861,49 @@ public class TaskRunner {
                 String question = st.optString("question",
                         "描述这张截图，指出关键可点击元素的位置");
                 try {
+                    // v3.14：虚拟屏模式下截虚拟屏
                     // 两级截屏：无障碍 → root 兜底（部分机型无障碍截屏直接失败）
-                    android.graphics.Bitmap shot =
-                            ScreenshotUtil.capture(ctx);
+                    android.graphics.Bitmap shot = (vdMode
+                            && VirtualDisplayManager.isActive())
+                            ? VirtualDisplayManager.screenshot()
+                            : ScreenshotUtil.capture(ctx);
                     if (shot == null) {
                         log("截屏失败（无障碍与 root 均不可用），无法调用视觉模型");
                         return false;
                     }
-                    // 视觉模型优先级：辅助模型列表 > 主力配置的视觉模型 > 主力模型
-                    String vBase = "", vKey = "", vModel = "";
+                    // v3.13 Issue 11：先看有没有可用模型，没有则本地降级
                     AuxModelStore aux = new AuxModelStore(ctx);
                     AuxModelStore.AuxModel vm = aux.getVisionModel();
-                    if (vm != null && !vm.apiKey.isEmpty()
-                            && !vm.baseUrl.isEmpty()) {
-                        vBase = vm.baseUrl;
-                        vKey = vm.apiKey;
-                        vModel = vm.model;
-                        log("👁 用辅助模型 " + vm.name + " 看屏幕");
-                    } else {
-                        LlmStore ls = new LlmStore(ctx);
-                        if (!ls.hasKey()) {
-                            log("未配置大模型 key，辅助模型里也没有视觉模型");
-                            return false;
+                    boolean hasAux = vm != null && !vm.apiKey.isEmpty()
+                            && !vm.baseUrl.isEmpty();
+                    LlmStore ls0 = new LlmStore(ctx);
+                    boolean hasMain = ls0.hasKey();
+                    if (!hasAux && !hasMain) {
+                        // 本地降级：从无障碍节点树找文字坐标（零依赖）
+                        String local = visionLocalFallback(question);
+                        if (local != null) {
+                            lastOutput = local;
+                            log("👁 本地降级命中: " + local);
+                            String saveAs0 = st.optString("save_as", "");
+                            if (!saveAs0.isEmpty()) params.put(saveAs0, lastOutput);
+                            return true;
                         }
-                        vBase = ls.getBaseUrl();
-                        vKey = ls.getApiKeyRaw();
-                        vModel = ls.getVisionModel();
-                        if (vModel.isEmpty()) vModel = ls.getModel();
+                        log("未配置大模型 key，本地降级也未找到匹配文字");
+                        return false;
                     }
+                    // v3.17：走 visionAsk（辅助失败自动降级主力）
+                    // v3.38：坐标统一口径——要求视觉模型以 0-1000 归一化回答，
+                    // 与 tap 的归一化入参对齐，避免缩放图像素与设备像素混用
                     log("👁 视觉提问: " + question);
-                    LlmClient vc = new LlmClient(vBase, vKey, vModel);
-                    LlmClient.Result vr = vc.chatVision(
-                            question + "\n\n如果问的是位置，请用屏幕坐标"
-                            + " (x, y) 回答，屏幕尺寸约 "
-                            + shot.getWidth() + "x" + shot.getHeight() + "。",
-                            shot, vModel);
-                    lastOutput = vr.ok ? vr.text : ("视觉调用失败: " + vr.text);
+                    String vans = visionAsk(question
+                            + "（如需给出坐标，请用 0-1000 归一化坐标：左上角 (0,0)，"
+                            + "右下角 (1000,1000)，不要用像素坐标）", shot);
+                    boolean vok = !vans.isEmpty();
+                    lastOutput = vok ? vans : "视觉调用失败（辅助与主力均不可用）";
                     log("👁 视觉回答: " + lastOutput);
                     String saveAs = st.optString("save_as", "");
                     if (!saveAs.isEmpty()) params.put(saveAs, lastOutput);
-                    return vr.ok;
+                    return vok;
                 } catch (Exception e) {
                     log("视觉调用异常: " + e.getMessage());
                     return false;
@@ -760,6 +1066,30 @@ public class TaskRunner {
                         + did + " " + kc + " 2>&1");
                 log("虚拟屏按键: " + out.trim());
                 return out.contains("down=true");
+            }
+            case "vd_input": {
+                // v3.14：虚拟屏文本输入（剪贴板 + Ctrl+V，支持中文；先聚焦输入框）
+                if (!ensureVdInput(ctx)) return false;
+                int did = VirtualDisplayManager.getDisplayId();
+                String text = st.optString("text", "");
+                if (text.isEmpty()) {
+                    log("vd_input 缺少 text 参数");
+                    return false;
+                }
+                String b64;
+                try {
+                    b64 = android.util.Base64.encodeToString(
+                            text.getBytes("UTF-8"),
+                            android.util.Base64.NO_WRAP);
+                } catch (Exception e) {
+                    log("vd_input 编码失败");
+                    return false;
+                }
+                String out = rootCmdOut("CLASSPATH=" + vdDexPath(ctx)
+                        + " app_process /system/bin VdInput input "
+                        + did + " " + b64 + " 2>&1");
+                log("虚拟屏输入: " + out.trim());
+                return out.contains("paste=true");
             }
             case "vd_screenshot": {
                 String path = st.optString("path", "");
@@ -1059,7 +1389,8 @@ public class TaskRunner {
                             }
                         }
                     } finally {
-                        if (!cardOk) {
+                        // v3.18：虚拟屏下不回桌面（没碰过主屏）
+                        if (!cardOk && !vdMode) {
                             try {
                                 rootCmd("input keyevent 3");
                                 log("🏠 技能卡异常结束，已回桌面");
@@ -1109,6 +1440,43 @@ public class TaskRunner {
             default:
                 log("未知步骤: " + do_);
                 return false;
+        }
+    }
+
+    /**
+     * v3.13 Issue 11：本地视觉降级（零依赖）。
+     * 从问题中提取候选文字，在无障碍节点树里找匹配节点的中心坐标。
+     * 命中返回 "(x, y)" 字符串，未命中返回 null。
+     * 覆盖最常用的"X 按钮/文字在哪"场景；图标识别仍需视觉模型。
+     */
+    private String visionLocalFallback(String question) {
+        try {
+            if (question == null || question.isEmpty()) return null;
+            // 候选词：引号内文字优先，其次按非中英文数字切分取长度>=2 的词
+            java.util.List<String> cands = new java.util.ArrayList<>();
+            java.util.regex.Matcher qm = java.util.regex.Pattern
+                    .compile("[\"\"']([^\"\"']{2,20})[\"\"']").matcher(question);
+            while (qm.find()) cands.add(qm.group(1));
+            for (String part : question.split("[^\\p{IsHan}a-zA-Z0-9]+")) {
+                if (part.length() >= 2 && !cands.contains(part)) cands.add(part);
+            }
+            if (cands.isEmpty()) return null;
+            java.util.List<AgentAccessibilityService.NodeInfo> nodes =
+                    AgentAccessibilityService.dumpScreen();
+            for (String cand : cands) {
+                String cl = cand.toLowerCase();
+                for (AgentAccessibilityService.NodeInfo ni : nodes) {
+                    String t = ni.text == null ? "" : ni.text.toLowerCase();
+                    String d = ni.desc == null ? "" : ni.desc.toLowerCase();
+                    if ((!t.isEmpty() && (t.contains(cl) || cl.contains(t)))
+                            || (!d.isEmpty() && (d.contains(cl) || cl.contains(d)))) {
+                        return "(" + ni.cx + ", " + ni.cy + ")";
+                    }
+                }
+            }
+            return null;
+        } catch (Exception e) {
+            return null;
         }
     }
 }
