@@ -636,6 +636,7 @@ public class MainActivity extends Activity {
                 return true;
             case "/clear":
                 if (chatStore != null) chatStore.newSession();
+                SharedMemory.clear(this);
                 clearChat();
                 agentLog("👋 对话已清空，在下方输入目标。");
                 return true;
@@ -760,7 +761,123 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    // v3.19：辅助模型拉取模型 id 列表（OpenAI 兼容 /models）
+    private void auxFetchModels(EditText etBase, EditText etKey,
+                                EditText etModel) {
+        String baseUrl = etBase.getText().toString().trim();
+        String apiKey = etKey.getText().toString().trim();
+        if (baseUrl.isEmpty() || apiKey.isEmpty()) {
+            log("先填 base_url 和 api_key");
+            return;
+        }
+        String url = baseUrl.endsWith("/") ? baseUrl + "models"
+                : baseUrl + "/models";
+        final String fUrl = url;
+        final String fKey = apiKey;
+        log("正在拉取模型列表...");
+        new Thread(() -> {
+            try {
+                java.net.URL u = new java.net.URL(fUrl);
+                java.net.HttpURLConnection c =
+                        (java.net.HttpURLConnection) u.openConnection();
+                c.setRequestMethod("GET");
+                c.setRequestProperty("Authorization", "Bearer " + fKey);
+                c.setConnectTimeout(15000);
+                c.setReadTimeout(15000);
+                int code = c.getResponseCode();
+                if (code != 200) {
+                    String msg = "HTTP " + code;
+                    try (java.io.InputStream es = c.getErrorStream()) {
+                        if (es != null) {
+                            byte[] buf = new byte[512];
+                            int n = es.read(buf);
+                            if (n > 0) msg += "：" + new String(buf, 0, n, "UTF-8");
+                        }
+                    } catch (Exception ignored) {}
+                    final String fMsg = msg;
+                    runOnUiThread(() -> log("拉取失败：" + fMsg));
+                    return;
+                }
+                StringBuilder sb = new StringBuilder();
+                try (java.io.BufferedReader br = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(c.getInputStream(), "UTF-8"))) {
+                    String line;
+                    while ((line = br.readLine()) != null) sb.append(line);
+                }
+                org.json.JSONObject jo = new org.json.JSONObject(sb.toString());
+                org.json.JSONArray data = jo.optJSONArray("data");
+                if (data == null || data.length() == 0) {
+                    runOnUiThread(() -> log("模型列表为空"));
+                    return;
+                }
+                java.util.List<String> ids = new java.util.ArrayList<>();
+                for (int i = 0; i < data.length(); i++) {
+                    String id = data.optJSONObject(i).optString("id", "");
+                    if (!id.isEmpty()) ids.add(id);
+                }
+                java.util.Collections.sort(ids);
+                final String[] items = ids.toArray(new String[0]);
+                runOnUiThread(() -> {
+                    new AlertDialog.Builder(this)
+                            .setTitle("选择模型（" + items.length + " 个）")
+                            .setItems(items, (d, which) -> {
+                                etModel.setText(items[which]);
+                                log("已选模型：" + items[which]);
+                            })
+                            .setNegativeButton("取消", null)
+                            .show();
+                });
+            } catch (Exception e) {
+                final String msg = e.getMessage();
+                runOnUiThread(() -> log("拉取失败：" + msg));
+            }
+        }).start();
+    }
+
     // v2.93：查看任务日志列表
+    // v3.11 Issue 8：记忆列表（可逐条删/一键清空）
+    private void showMemoryList() {
+        java.util.Map<String, String> mems = UserMemory.listAll(this);
+        if (mems.isEmpty()) {
+            log("暂无记忆");
+            return;
+        }
+        String[] keys = mems.keySet().toArray(new String[0]);
+        String[] items = new String[keys.length];
+        for (int i = 0; i < keys.length; i++) {
+            String v = mems.get(keys[i]);
+            items[i] = keys[i] + "："
+                    + (v.length() > 30 ? v.substring(0, 30) + "…" : v);
+        }
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("🧠 记忆（" + keys.length + " 条）")
+                .setItems(items, (d, which) -> {
+                    String k = keys[which];
+                    new android.app.AlertDialog.Builder(this)
+                            .setTitle(k)
+                            .setMessage(mems.get(k))
+                            .setPositiveButton("删除", (d2, w2) -> {
+                                UserMemory.remove(this, k);
+                                log("已删除记忆：" + k);
+                                showMemoryList();
+                            })
+                            .setNegativeButton("关闭", null)
+                            .show();
+                })
+                .setNeutralButton("清空全部", (d, w) -> {
+                    new android.app.AlertDialog.Builder(this)
+                            .setTitle("清空全部记忆？")
+                            .setPositiveButton("清空", (d2, w2) -> {
+                                UserMemory.clearAll(this);
+                                log("已清空全部记忆");
+                            })
+                            .setNegativeButton("取消", null)
+                            .show();
+                })
+                .setNegativeButton("关闭", null)
+                .show();
+    }
+
     private void showTaskLogs() {
         java.io.File[] logs = TaskRunLogger.listLogs(this);
         if (logs.length == 0) {
@@ -822,25 +939,19 @@ public class MainActivity extends Activity {
             }
             return;
         }
-        if (!llmStore.hasKey()) {
-            log("先在「云端大模型」配置 API Key");
-            return;
-        }
-        if (!AgentAccessibilityService.isRunning()) {
-            log("先开启无障碍权限");
-            return;
-        }
+        // v3.29：三端统一原则——执行中反馈、零token直达都不需要 Key/无障碍，先行处理；
+        // 无障碍不再做硬门：root 优先，无 root 又无无障碍时只警告、仍放行（与 TG 一致）
         if (agentThread != null && agentThread.isAlive()) {
             // 执行中发消息 = 指出问题，注入为实时反馈
             feedbackQueue.offer(goal);
             agentGoal.setText("");
             refocusInput();
-            agentLog("💬 已收到你的补充说明，思考执行员下一步会参考");
+            agentLog("💬 已收到你的补充说明，智能体下一步会参考");
             return;
         }
         agentGoal.setText("");
         refocusInput();
-        // 高频意图本地路由：零 token 直达，不烧大模型
+        // 高频意图本地路由：零 token 直达，不烧大模型，不查 Key/权限
         LocalIntentRouter.RouteResult localRr = null;
         try {
             localRr = LocalIntentRouter.tryRoute(this, goal);
@@ -853,10 +964,30 @@ public class MainActivity extends Activity {
                 runOnUiThread(this::refreshHistory);
                 return;
             }
+        } else {
+            try {
+                org.json.JSONObject rd = new org.json.JSONObject();
+                rd.put("goal", goal);
+                Telemetry.event(this, "app", "router_miss", rd);
+            } catch (Exception ignored) {
+            }
+        }
+        if (!llmStore.hasKey()) {
+            log("先在「云端大模型」配置 API Key");
+            return;
+        }
+        if (!AgentAccessibilityService.isRunning() && Root.findSu() == null) {
+            agentLog("⚠️ 无障碍未开启且无 root，屏幕操控不可用；涉及看屏/点击的任务会受限");
         }
         // v2.82：纯聊天不走任务流，直接对话回复
         // v3.02：真流式输出
         if (LocalIntentRouter.isChat(goal)) {
+            try {
+                org.json.JSONObject cd = new org.json.JSONObject();
+                cd.put("text", goal);
+                Telemetry.event(this, "app", "chat", cd);
+            } catch (Exception ignored) {
+            }
             agentGoal.setText("");
             refocusInput();
             final String chatGoal = goal;
@@ -865,7 +996,10 @@ public class MainActivity extends Activity {
                 LlmClient llm = new LlmClient(llmStore.getBaseUrl(),
                         llmStore.getApiKeyRaw(), llmStore.getModel());
                 String prompt = "你是手机Agent，一个友好、简洁的手机助手。用户说：" + chatGoal
-                        + "\n用一句话友好回应，如果用户没说具体要做什么，问他想让我干什么。不要输出JSON。";
+                        + "\n用一句话友好回应，如果用户没说具体要做什么，问他想让我干什么。不要输出JSON。"
+                        + "【重要】你现在是纯聊天模式、没有任何操作手机的工具，绝不能声称已经帮用户"
+                        + "打开/关闭/设置/发送/删除了任何东西；如果用户是在让你操作手机，"
+                        + "直接告诉他：把这条单独发给我，我按任务执行。";
                 final TextView tv = startStreamBubble();
                 final StringBuilder full = new StringBuilder();
                 LlmClient.Result r = llm.chatStream(prompt, token -> {
@@ -925,7 +1059,7 @@ public class MainActivity extends Activity {
                 final int MAX_SUP_ROUNDS = 2; // 监管者最多要求继续 2 轮
                 final AgentLoop[] loopRef = new AgentLoop[1];
                 String lastMissing = "";
-                int stepBudget = 25;
+                int stepBudget = AgentLoop.NO_LIMIT;
 
                 // ===== 对话上下文（最近 6 条，裁剪） =====
                 String convCtx = "";
@@ -1046,14 +1180,25 @@ public class MainActivity extends Activity {
                         loop.setAllowAdvanced(agentAdvBox != null && agentAdvBox.isChecked());
                         loop.setSupervisorEnabled(agentSupervisorBox != null
                                 && agentSupervisorBox.isChecked());
+                        loop.setSupervisorClient(llmStore.supervisorClient());
                         // 风险审批：编译期分级 + 用户策略，本地弹窗确认
                         loop.setRiskPolicy(riskPolicy);
                         loop.setApprover(MainActivity.this::askUserApprove);
                         loop.setRemote(false);
+                        loop.setChannel("app");
                         if (!fCtx.isEmpty()) loop.setConversationContext(fCtx);
                         String profTxt = userProfile.describeForPrompt();
                         if (!profTxt.isEmpty()) loop.setConversationContext(
                                 fCtx.isEmpty() ? profTxt : fCtx + "\n" + profTxt);
+                        // v3.44：一份共享记忆——叠加三端共用轮次
+                        String sharedCtx = SharedMemory.recentText(this, 3);
+                        if (!sharedCtx.isEmpty()) {
+                            String base = fCtx.isEmpty() ? "" : fCtx + "\n";
+                            String prof = profTxt.isEmpty()
+                                    ? "" : "\n" + profTxt;
+                            loop.setConversationContext(
+                                    base + sharedCtx + prof);
+                        }
                         if (!fPlan.isEmpty()) loop.setPlan(fPlan);
                         if (!fSteps.isEmpty()) loop.setTodoSteps(fSteps);
                         if (!supFeedback.isEmpty()) loop.setSupervisorFeedback(supFeedback);
@@ -1114,7 +1259,7 @@ public class MainActivity extends Activity {
                                 AgentAccessibilityService.dumpScreen();
                         String fScreen = fNodes.isEmpty()
                                 ? "(读屏为空)" : AgentLoop.serialize(fNodes);
-                        verdict = Supervisor.review(agentClient(), taskGoal,
+                        verdict = Supervisor.review(llmStore.supervisorClient(), taskGoal,
                                 finalDone, lastHistory, fScreen);
                     } catch (Exception e) {
                         supervisorLog("🔍 监管者复核异常：" + e.getMessage());
@@ -1146,14 +1291,9 @@ public class MainActivity extends Activity {
                         confirmedDone = false;
                         break;
                     }
-                    // 智能步数：小缺口收尾用 8 步，大缺口用 25 步
-                    stepBudget = verdict.progressPct >= 70 ? 8 : 25;
-                    supFeedback = Supervisor.buildFeedback(verdict);
-                    agentLog("🔁 监管者：完成度约 " + verdict.progressPct + "%，"
-                            + (stepBudget < 25 ? "只需针对性收尾"
-                                    : "需要继续执行")
-                            + "（第 " + (supRound + 2) + " 轮，最多 "
-                            + stepBudget + " 步）…");
+                    // v3.34：步数不设限，监管者只给反馈、不再砍步数
+                                        supFeedback = Supervisor.buildFeedback(verdict);
+                    agentLog("🔁 监管者：完成度约 " + verdict.progressPct + "%，需要继续执行（第 " + (supRound + 2) + " 轮）…");
                 }
 
                 stopped = agentStop;
@@ -1165,6 +1305,12 @@ public class MainActivity extends Activity {
                         + " · 监管" + completedRounds + "轮"
                         + (lastProgressPct >= 0
                                 ? " · 完成度" + lastProgressPct + "%" : "");
+                // v3.44：一份共享记忆——App 这一轮也写进三端共用轮次
+                // v3.45：结果尾巴三端对齐——带上用时/步数/监管/完成度明细
+                SharedMemory.addRound(this, "app", taskGoal,
+                        (confirmedDone ? "任务完成"
+                                : (stopped ? "被手动停止" : "任务未完成"))
+                                + "，" + richDetail);
                 if (confirmedDone) {
                     agentLog("🎉 任务完成（监管者已确认）");
                     // v3.08：任务完成给日志入口（用户在玩时点开看，不在时只存文件）
@@ -1210,17 +1356,28 @@ public class MainActivity extends Activity {
             } catch (Exception e) {
                 agentLog("异常：" + e.getMessage());
             } finally {
+                TaskLock.release("app"); // v3.32：三通道互斥释放
                 runOnUiThread(() -> {
                     FloatWindow.hide();
                     stopInputFlow();
                     if (agentSendBtn != null) agentSendBtn.setText("发送");
                 });
             }        }, "agent-loop");
-        agentThread.start();
+        // v3.32：三通道真互斥——TG/远控占用时不并发抢屏
+        if (!TaskLock.tryAcquire("app")) {
+            agentLog("⏳ 任务忙（" + TaskLock.current() + " 通道正在执行），请稍后再试");
+            return;
+        }
+        try {
+            agentThread.start();
+        } catch (Exception e) {
+            TaskLock.release("app");
+            throw e;
+        }
         runOnUiThread(() -> {
             if (agentSendBtn != null) agentSendBtn.setText("停止");
         });
-        agentLog("▶ 开始执行（最多 25 步，可点停止）");
+        agentLog("▶ 开始执行（可点停止）");
     }
 
     private String localIps() {
@@ -1263,7 +1420,7 @@ public class MainActivity extends Activity {
 
         LinearLayout menu = new LinearLayout(this);
         menu.setOrientation(LinearLayout.VERTICAL);
-        menu.setPadding(0, dp(8), 0, dp(8));
+        menu.setPadding(0, dp(8), 0, dp(100)); // v3.20：底部避让悬浮胶囊tab
         LinearLayout homeList = menuCard();
         addMenuRow(homeList, "📊", "状态", "无障碍权限与服务状态",
                 v -> showHomeSection("status"));
@@ -1277,6 +1434,8 @@ public class MainActivity extends Activity {
                 v -> showHomeSection("sched"));
         addMenuRow(homeList, "📝", "运行记录", "任务执行历史",
                 v -> showHomeSection("hist"));
+        addMenuRow(homeList, "🧠", "智能沉淀", "运行数据汇总报告，分享给 Muse 分析更新",
+                v -> showSediment());
         menu.addView(homeList);
 
         homeMenuScroll = new ScrollView(this);
@@ -1367,6 +1526,53 @@ public class MainActivity extends Activity {
         return t2;
     }
 
+    /** v3.31 智能沉淀：报告列表 + 分享给 Muse */
+    private void showSediment() {
+        java.util.List<java.io.File> files = SedimentReport.all(this);
+        java.util.List<String> names = new java.util.ArrayList<>();
+        if (files.isEmpty()) {
+            names.add("（暂无报告，有运行数据后在 1/7/30 天节点自动生成）");
+        } else {
+            for (java.io.File f : files) names.add(f.getName());
+        }
+        names.add("➕ 立即生成近 7 天报告");
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("🧠 智能沉淀报告")
+                .setItems(names.toArray(new String[0]), (d, w) -> {
+                    if (w == names.size() - 1) {
+                        new Thread(() -> {
+                            java.io.File f = SedimentReport.generate(this, 7);
+                            runOnUiThread(() -> {
+                                if (f != null) shareSediment(f);
+                                else android.widget.Toast.makeText(this, "近 7 天还没有运行数据", android.widget.Toast.LENGTH_SHORT).show();
+                            });
+                        }).start();
+                    } else if (!files.isEmpty() && w < files.size()) {
+                        shareSediment(files.get(w));
+                    }
+                })
+                .setNegativeButton("关闭", null)
+                .show();
+    }
+
+    private void shareSediment(java.io.File f) {
+        try {
+            java.io.BufferedReader r = new java.io.BufferedReader(
+                    new java.io.FileReader(f));
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = r.readLine()) != null) sb.append(line).append("\n");
+            r.close();
+            android.content.Intent it = new android.content.Intent(
+                    android.content.Intent.ACTION_SEND);
+            it.setType("text/plain");
+            it.putExtra(android.content.Intent.EXTRA_TEXT, sb.toString());
+            startActivity(android.content.Intent.createChooser(it, "分享沉淀报告给 Muse"));
+        } catch (Exception e) {
+            android.widget.Toast.makeText(this, "读取报告失败：" + e.getMessage(), android.widget.Toast.LENGTH_SHORT).show();
+        }
+    }
+
     private void showHomeSection(String key) {
         LinearLayout sec = homeSections.get(key);
         if (sec == null) return;
@@ -1378,6 +1584,8 @@ public class MainActivity extends Activity {
         back.setOnClickListener(v -> showHomeMenu());
         homeDetailWrap.addView(back);
         ScrollView sv = new ScrollView(this);
+        sv.setClipToPadding(false);
+        sv.setPadding(0, 0, 0, dp(100)); // v3.20：底部避让悬浮胶囊tab
         sv.addView(sec);
         homeDetailWrap.addView(sv, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
@@ -1688,7 +1896,16 @@ public class MainActivity extends Activity {
         etModel.setTextSize(13);
         if (exist != null) etModel.setText(exist.model);
         else etModel.setText("glm-4v-flash");
-        form.addView(etModel);
+        // v3.19：model 行加拉取按钮（从 base_url 拉取模型 id 列表）
+        LinearLayout modelRow = new LinearLayout(this);
+        modelRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams mp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        modelRow.addView(etModel, mp);
+        Button bFetchAux = smallBtn("拉取");
+        bFetchAux.setOnClickListener(v -> auxFetchModels(etBase, etKey, etModel));
+        modelRow.addView(bFetchAux);
+        form.addView(modelRow);
         // 用途选择：视觉/语音/图像/对话
         final String[] kinds = {AuxModelStore.KIND_VISION,
                 AuxModelStore.KIND_VOICE, AuxModelStore.KIND_IMAGE,
@@ -1772,6 +1989,7 @@ public class MainActivity extends Activity {
         Button newChatBtn = smallBtn("✏️ 新对话");
         newChatBtn.setOnClickListener(v -> {
             if (chatStore != null) chatStore.newSession();
+                SharedMemory.clear(this);
             clearChat();
             agentLog("👋 新对话开始，在下方输入目标。");
         });
@@ -2209,19 +2427,77 @@ public class MainActivity extends Activity {
             }
             String txt = cm.getPrimaryClip().getItemAt(0)
                     .coerceToText(this).toString().trim();
+            importSkillCardJson(txt);
+        } catch (Exception e) {
+            log("导入失败：" + e.getMessage());
+        }
+    }
+
+    /** v3.12 Issue 12：文件选择回调 */
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode,
+                                    Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_IMPORT && resultCode == RESULT_OK
+                && data != null && data.getData() != null) {
+            try {
+                java.io.InputStream is = getContentResolver()
+                        .openInputStream(data.getData());
+                byte[] buf = new byte[65536];
+                java.io.ByteArrayOutputStream bos =
+                        new java.io.ByteArrayOutputStream();
+                int n;
+                while ((n = is.read(buf)) > 0) bos.write(buf, 0, n);
+                is.close();
+                String txt = new String(bos.toByteArray(),
+                        java.nio.charset.StandardCharsets.UTF_8).trim();
+                importSkillCardJson(txt);
+            } catch (Exception e) {
+                log("读取文件失败：" + e.getMessage());
+            }
+        }
+    }
+
+    /** v3.12 Issue 12：导入技能卡 JSON（剪贴板/文件共用）：校验+风险提示 */
+    private void importSkillCardJson(String txt) {
+        try {
             org.json.JSONObject o = AgentLoop.extractJson(txt);
             if (o == null) {
                 log("剪贴板里没找到合法 JSON");
                 return;
             }
-            String name = o.optString("name", "未命名技能");
+            // v3.12 Issue 12：结构校验 + 风险扫描
+            String err = SkillCardStore.validateImport(o);
+            if (err != null) {
+                log("导入校验失败：" + err);
+                return;
+            }
             String type = o.optString("type", "skill");
-            org.json.JSONArray steps = o.optJSONArray("steps");
-            String content = steps != null ? steps.toString() : o.toString();
-            new SkillCardStore(this).add(name, type, "user",
-                    "AI 生成", content, "从抓取记录生成");
-            refreshSkillCards();
-            log("已导入技能卡：" + name);
+            String content = o.optString("content", "");
+            // 兼容老格式：顶层 steps 数组
+            if (content.isEmpty() && o.optJSONArray("steps") != null) {
+                content = new org.json.JSONObject()
+                        .put("steps", o.optJSONArray("steps")).toString();
+                o.put("content", content);
+            }
+            String riskWarn = SkillCardStore.scanRisk(type, content);
+            final org.json.JSONObject fo = o;
+            Runnable doImport = () -> {
+                String id = new SkillCardStore(this).importValidated(fo);
+                refreshSkillCards();
+                log("已导入技能卡：" + fo.optString("name", "")
+                        + (id != null ? "" : "（失败）"));
+            };
+            if (!riskWarn.isEmpty()) {
+                new android.app.AlertDialog.Builder(this)
+                        .setTitle("⚠️ 风险提示")
+                        .setMessage("该技能卡" + riskWarn + "\n确定导入吗？")
+                        .setPositiveButton("导入", (d, w) -> doImport.run())
+                        .setNegativeButton("取消", null)
+                        .show();
+            } else {
+                doImport.run();
+            }
         } catch (Exception e) {
             log("导入失败：" + e.getMessage());
         }
@@ -2356,7 +2632,22 @@ public class MainActivity extends Activity {
                 new SkillCardStore(this).delete(cid);
                 refreshSkillCards();
             });
+            Button bExp = smallBtn("导出");
+            bExp.setOnClickListener(v -> {
+                String json = new SkillCardStore(this).exportJson(cid);
+                if (json == null) {
+                    log("导出失败");
+                    return;
+                }
+                android.content.ClipboardManager cm =
+                        (android.content.ClipboardManager)
+                                getSystemService(CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(android.content.ClipData.newPlainText(
+                        "技能卡", json));
+                log("技能卡 JSON 已复制到剪贴板，可分享给他人导入");
+            });
             btnRow.addView(bRun);
+            btnRow.addView(bExp);
             btnRow.addView(bDel);
             row.addView(btnRow);
             skillCardsBox.addView(row);
@@ -2448,9 +2739,8 @@ public class MainActivity extends Activity {
             log("有任务在运行中…");
             return;
         }
-        if (!AgentAccessibilityService.isRunning()) {
-            log("请先开启无障碍权限");
-            return;
+        if (!AgentAccessibilityService.isRunning() && Root.findSu() == null) {
+            log("⚠️ 无障碍未开启且无 root，技能里需要看屏/点击的步骤可能失败");
         }
         runner = new TaskRunner(this, msg -> {
         });
@@ -2604,7 +2894,7 @@ public class MainActivity extends Activity {
         Spinner spType = new Spinner(this);
         ArrayAdapter<String> ad2 = new ArrayAdapter<>(this,
                 android.R.layout.simple_spinner_item,
-                new String[]{"每天", "每间隔"});
+                new String[]{"每天", "每间隔", "每周几", "一次性"});
         ad2.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         spType.setAdapter(ad2);
         form.addView(spType);
@@ -2612,6 +2902,42 @@ public class MainActivity extends Activity {
         EditText et = new EditText(this);
         et.setHint("每天填 08:30；间隔填分钟数如 60");
         form.addView(et);
+
+        // v3.12 Issue 13：周几多选（仅"每周几"类型用）
+        LinearLayout weekRow = new LinearLayout(this);
+        weekRow.setOrientation(LinearLayout.HORIZONTAL);
+        String[] weekNames = {"日", "一", "二", "三", "四", "五", "六"};
+        android.widget.CheckBox[] weekBoxes = new android.widget.CheckBox[7];
+        for (int i = 0; i < 7; i++) {
+            android.widget.CheckBox cb = new android.widget.CheckBox(this);
+            cb.setText(weekNames[i]);
+            cb.setTextSize(12);
+            // 默认勾选工作日
+            int dow = i + 1; // 1=周日
+            if (dow >= 2 && dow <= 6) cb.setChecked(true);
+            weekBoxes[i] = cb;
+            weekRow.addView(cb);
+        }
+        weekRow.setVisibility(android.view.View.GONE);
+        form.addView(weekRow);
+        spType.setOnItemSelectedListener(
+                new android.widget.AdapterView.OnItemSelectedListener() {
+                    @Override
+                    public void onItemSelected(
+                            android.widget.AdapterView<?> a,
+                            android.view.View v, int pos, long id) {
+                        weekRow.setVisibility(pos == 2
+                                ? android.view.View.VISIBLE
+                                : android.view.View.GONE);
+                        if (pos == 0) et.setHint("填 08:30");
+                        else if (pos == 1) et.setHint("填分钟数如 60");
+                        else if (pos == 2) et.setHint("填 08:30（勾选周几）");
+                        else et.setHint("填 MM-dd HH:mm，如 10-20 08:30");
+                    }
+                    @Override
+                    public void onNothingSelected(
+                            android.widget.AdapterView<?> a) {}
+                });
 
         new AlertDialog.Builder(this)
                 .setTitle("添加定时任务")
@@ -2622,17 +2948,53 @@ public class MainActivity extends Activity {
                         sc.skillId = skills.get(spSkill.getSelectedItemPosition()).id;
                         sc.skillName = skills.get(spSkill.getSelectedItemPosition()).name;
                         String input = et.getText().toString().trim();
-                        if (spType.getSelectedItemPosition() == 0) {
+                        int typePos = spType.getSelectedItemPosition();
+                        if (typePos == 0) {
                             String[] hm = input.split(":");
                             sc.type = "daily";
                             sc.hour = Integer.parseInt(hm[0].trim());
                             sc.minute = Integer.parseInt(hm[1].trim());
                             if (sc.hour < 0 || sc.hour > 23 || sc.minute < 0 || sc.minute > 59)
                                 throw new IllegalArgumentException();
-                        } else {
+                        } else if (typePos == 1) {
                             sc.type = "interval";
                             sc.everyMin = Integer.parseInt(input);
                             if (sc.everyMin <= 0) throw new IllegalArgumentException();
+                        } else if (typePos == 2) {
+                            // v3.12 Issue 13：每周几
+                            String[] hm = input.split(":");
+                            sc.type = "weekly";
+                            sc.hour = Integer.parseInt(hm[0].trim());
+                            sc.minute = Integer.parseInt(hm[1].trim());
+                            if (sc.hour < 0 || sc.hour > 23 || sc.minute < 0 || sc.minute > 59)
+                                throw new IllegalArgumentException();
+                            StringBuilder wb = new StringBuilder();
+                            for (int i = 0; i < 7; i++) {
+                                if (weekBoxes[i].isChecked()) {
+                                    if (wb.length() > 0) wb.append(",");
+                                    wb.append(i + 1);
+                                }
+                            }
+                            if (wb.length() == 0) throw new IllegalArgumentException();
+                            sc.weekdays = wb.toString();
+                        } else {
+                            // v3.12 Issue 13：一次性 MM-dd HH:mm
+                            java.text.SimpleDateFormat f =
+                                    new java.text.SimpleDateFormat("MM-dd HH:mm",
+                                            java.util.Locale.getDefault());
+                            java.util.Date dd = f.parse(input);
+                            java.util.Calendar c =
+                                    java.util.Calendar.getInstance();
+                            c.setTime(dd);
+                            c.set(java.util.Calendar.YEAR,
+                                    java.util.Calendar.getInstance()
+                                            .get(java.util.Calendar.YEAR));
+                            // 若时间已过，顺延到明年
+                            if (c.getTimeInMillis() <= System.currentTimeMillis()) {
+                                c.add(java.util.Calendar.YEAR, 1);
+                            }
+                            sc.type = "once";
+                            sc.onceAt = c.getTimeInMillis();
                         }
                         scheduleStore.add(sc);
                         refreshSchedules();
@@ -2663,7 +3025,7 @@ public class MainActivity extends Activity {
 
         LinearLayout menu = new LinearLayout(this);
         menu.setOrientation(LinearLayout.VERTICAL);
-        menu.setPadding(0, dp(8), 0, dp(8));
+        menu.setPadding(0, dp(8), 0, dp(100)); // v3.20：底部避让悬浮胶囊tab
         LinearLayout remoteList = menuCard();
         remoteSvcSub = addMenuRow(remoteList, "🌐", "远程控制服务",
                 "HTTP 服务开关（端口 " + AgentService.getPort(this) + "）",
@@ -2702,6 +3064,8 @@ public class MainActivity extends Activity {
         back.setOnClickListener(v -> showRemoteMenu());
         remoteDetailWrap.addView(back);
         ScrollView sv = new ScrollView(this);
+        sv.setClipToPadding(false);
+        sv.setPadding(0, 0, 0, dp(100)); // v3.20：底部避让悬浮胶囊tab
         sv.addView(sec);
         remoteDetailWrap.addView(sv, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
@@ -2801,6 +3165,8 @@ public class MainActivity extends Activity {
         svcCard.addView(svcInfo);
         Button bStart = btn("启动服务");
         bStart.setOnClickListener(v -> {
+            // v3.42：手动启动 → 清除停止标记，自启守护恢复工作
+            BootReceiver.setUserStopped(this, false);
             Intent it = new Intent(this, AgentService.class);
             if (android.os.Build.VERSION.SDK_INT >= 26) {
                 startForegroundService(it);
@@ -2812,6 +3178,8 @@ public class MainActivity extends Activity {
         svcCard.addView(bStart);
         Button bStop = btn("停止服务");
         bStop.setOnClickListener(v -> {
+            // v3.42：手动停止 → 立标记，开机/更新/看门狗都不再自动拉起
+            BootReceiver.setUserStopped(this, true);
             stopService(new Intent(this, AgentService.class));
             svcInfo.postDelayed(this::refreshSvc, 500);
         });
@@ -2819,7 +3187,67 @@ public class MainActivity extends Activity {
         Button bPort = btn("修改端口");
         bPort.setOnClickListener(v -> showPortDialog());
         svcCard.addView(bPort);
+        // v3.11 Issue 6：厂商 ROM 保活引导
+        Button bKeep = btn("🔋 保活设置引导");
+        bKeep.setOnClickListener(v -> showKeepAliveGuide());
+        svcCard.addView(bKeep);
         return svcCard;
+    }
+
+    /** v3.11 Issue 6：MIUI/ColorOS 等保活引导 */
+    private void showKeepAliveGuide() {
+        String manu = android.os.Build.MANUFACTURER.toLowerCase();
+        StringBuilder sb = new StringBuilder();
+        sb.append("本 App 需长期后台运行（远控/TG/定时任务），");
+        sb.append("国产 ROM 会激进杀后台，请按下面设置：\n\n");
+        if (manu.contains("xiaomi") || manu.contains("redmi")) {
+            sb.append("【MIUI】\n")
+              .append("1. 设置 → 应用设置 → 授权管理 → 自启动管理 → 允许本 App 自启动\n")
+              .append("2. 设置 → 电池与性能 → 应用省电 → 本 App → 无限制\n")
+              .append("3. 最近任务划卡时点 🔒 锁定本 App\n");
+        } else if (manu.contains("oppo") || manu.contains("realme")
+                || manu.contains("oneplus")) {
+            sb.append("【ColorOS】\n")
+              .append("1. 设置 → 电池 → 应用耗电管理 → 本 App → 允许后台活动\n")
+              .append("2. 设置 → 应用管理 → 自启动管理 → 允许\n");
+        } else if (manu.contains("vivo") || manu.contains("iqoo")) {
+            sb.append("【OriginOS】\n")
+              .append("1. 设置 → 电池 → 后台耗电管理 → 本 App → 允许\n")
+              .append("2. i 管家 → 应用管理 → 自启动管理 → 允许\n");
+        } else if (manu.contains("huawei") || manu.contains("honor")) {
+            sb.append("【EMUI/HarmonyOS】\n")
+              .append("1. 设置 → 电池 → 应用启动管理 → 本 App → 手动管理（全开）\n");
+        } else {
+            sb.append("1. 系统设置 → 电池/省电 → 找到本 App → 设为无限制\n")
+              .append("2. 允许自启动\n");
+        }
+        sb.append("\n提示：本 App targetSdk 28 是为了兼容 Termux，");
+        sb.append("系统提示专为旧版 Android 打造属正常现象。");
+        LinearLayout ll = new LinearLayout(this);
+        ll.setOrientation(LinearLayout.VERTICAL);
+        ll.setPadding(dp(16), dp(8), dp(16), dp(8));
+        TextView tv = new TextView(this);
+        tv.setText(sb.toString());
+        tv.setTextSize(13);
+        tv.setTextColor(TEXT_DARK);
+        tv.setLineSpacing(dp(3), 1f);
+        ll.addView(tv);
+        Button bBatt = smallBtn("打开电池优化设置");
+        bBatt.setOnClickListener(v -> {
+            try {
+                startActivity(new android.content.Intent(
+                        android.provider.Settings
+                                .ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+            } catch (Exception e) {
+                log("无法打开设置");
+            }
+        });
+        ll.addView(bBatt);
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("🔋 后台保活设置")
+                .setView(ll)
+                .setPositiveButton("知道了", null)
+                .show();
     }
 
     /** 修改远控端口：1024–65535；服务运行时自动重启生效 */
@@ -2935,6 +3363,92 @@ public class MainActivity extends Activity {
             log("已复制，发给云端 Muse 即可");
         });
         museCard.addView(bCopy);
+        // v3.11 Issue 1：Token 管理
+        TextView tokenTitle = new TextView(this);
+        tokenTitle.setText("🔑 Token 管理");
+        tokenTitle.setTextSize(14);
+        tokenTitle.setTextColor(TEXT_DARK);
+        tokenTitle.setPadding(0, dp(12), 0, dp(4));
+        museCard.addView(tokenTitle);
+        final TokenManager tm = new TokenManager(this);
+        TextView tokenInfo = new TextView(this);
+        tokenInfo.setTextSize(12);
+        tokenInfo.setTextColor(TEXT_GRAY);
+        Runnable refreshTokenInfo = () -> {
+            String masked = TokenManager.mask(tm.getToken());
+            long remainMs = tm.getRemainingMs();
+            String remainStr = remainMs < 0 ? "永久有效"
+                    : "剩余 " + (remainMs / 86400000) + " 天";
+            tokenInfo.setText("当前 Token：" + masked + "\n" + remainStr);
+        };
+        refreshTokenInfo.run();
+        museCard.addView(tokenInfo);
+        // 有效期选择
+        LinearLayout expiryRow = new LinearLayout(this);
+        expiryRow.setOrientation(LinearLayout.HORIZONTAL);
+        expiryRow.setGravity(Gravity.CENTER_VERTICAL);
+        TextView expiryLabel = new TextView(this);
+        expiryLabel.setText("有效期：");
+        expiryLabel.setTextSize(13);
+        expiryRow.addView(expiryLabel);
+        android.widget.Spinner expirySpinner = new android.widget.Spinner(this);
+        String[] expOptions = {"永久", "7 天", "30 天"};
+        int[] expValues = {0, 7, 30};
+        android.widget.ArrayAdapter<String> expAdapter =
+                new android.widget.ArrayAdapter<>(this,
+                        android.R.layout.simple_spinner_item, expOptions);
+        expAdapter.setDropDownViewResource(
+                android.R.layout.simple_spinner_dropdown_item);
+        expirySpinner.setAdapter(expAdapter);
+        int curExp = tm.getExpiryDays();
+        for (int i = 0; i < expValues.length; i++) {
+            if (expValues[i] == curExp) {
+                expirySpinner.setSelection(i);
+                break;
+            }
+        }
+        expirySpinner.setOnItemSelectedListener(
+                new android.widget.AdapterView.OnItemSelectedListener() {
+                    @Override
+                    public void onItemSelected(
+                            android.widget.AdapterView<?> p, android.view.View v,
+                            int pos, long id) {
+                        tm.setExpiryDays(expValues[pos]);
+                        refreshTokenInfo.run();
+                        log("Token 有效期 → " + expOptions[pos]);
+                    }
+                    @Override
+                    public void onNothingSelected(
+                            android.widget.AdapterView<?> p) {}
+                });
+        expiryRow.addView(expirySpinner);
+        museCard.addView(expiryRow);
+        // 轮换/吊销按钮
+        LinearLayout tokenBtns = new LinearLayout(this);
+        tokenBtns.setOrientation(LinearLayout.HORIZONTAL);
+        Button bRotate = smallBtn("🔄 轮换");
+        bRotate.setOnClickListener(v -> {
+            String newToken = tm.rotate();
+            refreshTokenInfo.run();
+            log("Token 已轮换：" + TokenManager.mask(newToken)
+                    + "，旧 token 立即失效");
+        });
+        Button bRevoke = smallBtn("🚫 吊销");
+        bRevoke.setOnClickListener(v -> {
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle("吊销 Token？")
+                    .setMessage("吊销后当前 token 立即失效，需重新复制连接信息给 Muse。")
+                    .setPositiveButton("吊销", (d, w) -> {
+                        tm.revoke();
+                        refreshTokenInfo.run();
+                        log("Token 已吊销");
+                    })
+                    .setNegativeButton("取消", null)
+                    .show();
+        });
+        tokenBtns.addView(bRotate);
+        tokenBtns.addView(bRevoke);
+        museCard.addView(tokenBtns);
         return museCard;
     }
 
@@ -3075,7 +3589,7 @@ public class MainActivity extends Activity {
     private LinearLayout buildTermPage() {
         LinearLayout inner = new LinearLayout(this);
         inner.setOrientation(LinearLayout.VERTICAL);
-        inner.setPadding(0, dp(8), 0, dp(8));
+        inner.setPadding(0, dp(8), 0, dp(100)); // v3.20：底部避让悬浮胶囊tab
 
         // 内置 Termux 环境卡片
         LinearLayout envCard = card();
@@ -3139,7 +3653,8 @@ public class MainActivity extends Activity {
         Button fixBtn = smallBtn("🔧 修复链接");
         fixBtn.setOnClickListener(v -> {
             new Thread(() -> {
-                final String result = bootstrapManager.fixSymlinks();
+                final String result = bootstrapManager.fixSymlinks()
+                        + "\n" + bootstrapManager.fixShebangs();
                 runOnUiThread(() -> {
                     log(result);
                     appendTerm(result + "\n");
@@ -3851,7 +4366,7 @@ public class MainActivity extends Activity {
     private LinearLayout buildMyPage() {
         LinearLayout inner = new LinearLayout(this);
         inner.setOrientation(LinearLayout.VERTICAL);
-        inner.setPadding(0, dp(8), 0, dp(8));
+        inner.setPadding(0, dp(8), 0, dp(100)); // v3.20：底部避让悬浮胶囊tab
 
         // ---- 软件自检卡 ----
         inner.addView(buildSelfCheckCard());
@@ -4004,7 +4519,140 @@ public class MainActivity extends Activity {
         bViewLogs.setOnClickListener(v -> showTaskLogs());
         logHeader.addView(bViewLogs);
         logCard.addView(logHeader);
+        // v3.11 Issue 7：日志占用 + 保留天数 + 一键清理
+        TextView logSizeTv = new TextView(this);
+        logSizeTv.setTextSize(12);
+        logSizeTv.setTextColor(DyColor.onSurfaceVariant(this));
+        logSizeTv.setPadding(dp(4), dp(2), dp(4), 0);
+        Runnable refreshLogSize = () -> {
+            long bytes = TaskRunLogger.getLogDirSize(this);
+            String s2 = bytes < 1024 ? bytes + "B"
+                    : bytes < 1048576
+                    ? String.format("%.1fKB", bytes / 1024.0)
+                    : String.format("%.1fMB", bytes / 1048576.0);
+            logSizeTv.setText("占用 " + s2 + "（自动保留 30 天内/最多 200 个）");
+        };
+        refreshLogSize.run();
+        logCard.addView(logSizeTv);
+        LinearLayout logOptRow = new LinearLayout(this);
+        logOptRow.setOrientation(LinearLayout.HORIZONTAL);
+        logOptRow.setGravity(Gravity.CENTER_VERTICAL);
+        TextView keepLabel = new TextView(this);
+        keepLabel.setText("保留天数：");
+        keepLabel.setTextSize(12);
+        logOptRow.addView(keepLabel);
+        EditText keepEt = new EditText(this);
+        keepEt.setTextSize(12);
+        keepEt.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        keepEt.setText(String.valueOf(getSharedPreferences("agent",
+                MODE_PRIVATE).getInt("log_keep_days", 30)));
+        keepEt.setEms(4);
+        keepEt.setOnFocusChangeListener((v, has) -> {
+            if (!has) {
+                try {
+                    int d = Integer.parseInt(keepEt.getText().toString());
+                    if (d < 1) d = 1;
+                    if (d > 365) d = 365;
+                    getSharedPreferences("agent", MODE_PRIVATE).edit()
+                            .putInt("log_keep_days", d).apply();
+                    TaskRunLogger.cleanupOldLogs(this);
+                    refreshLogSize.run();
+                    log("日志保留天数 → " + d);
+                } catch (Exception ignored) {
+                }
+            }
+        });
+        logOptRow.addView(keepEt);
+        Button bClean = smallBtn("🧹 一键清理过期");
+        bClean.setOnClickListener(v -> {
+            TaskRunLogger.cleanupOldLogs(this);
+            refreshLogSize.run();
+            showTaskLogs();
+            log("已清理过期日志");
+        });
+        logOptRow.addView(bClean);
+        logCard.addView(logOptRow);
         inner.addView(logCard);
+
+        // v3.13 Issue 3：热补丁管理
+        LinearLayout patchCard = card();
+        LinearLayout patchHeader = new LinearLayout(this);
+        patchHeader.setOrientation(LinearLayout.HORIZONTAL);
+        patchHeader.setGravity(Gravity.CENTER_VERTICAL);
+        TextView patchTitle = new TextView(this);
+        patchTitle.setText("🩹 热补丁");
+        patchTitle.setTextSize(16);
+        patchTitle.setTypeface(patchTitle.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams patchLp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        patchHeader.addView(patchTitle, patchLp);
+        patchCard.addView(patchHeader);
+        TextView patchStatus = new TextView(this);
+        patchStatus.setTextSize(12);
+        patchStatus.setTextColor(DyColor.onSurfaceVariant(this));
+        Runnable refreshPatch = () -> {
+            String tag = PatchManager.loadedTag(this);
+            patchStatus.setText("当前补丁：" + (tag.isEmpty() ? "无" : tag)
+                    + (PatchManager.hasBackup(this) ? "（有备份可回滚）" : ""));
+        };
+        refreshPatch.run();
+        patchCard.addView(patchStatus);
+        android.widget.CheckBox patchEnableBox =
+                new android.widget.CheckBox(this);
+        patchEnableBox.setText("启用热补丁（关闭后重启生效）");
+        patchEnableBox.setTextSize(12);
+        patchEnableBox.setChecked(getSharedPreferences("agent", MODE_PRIVATE)
+                .getBoolean("patch_enabled", true));
+        patchEnableBox.setOnCheckedChangeListener((v, on) -> {
+            getSharedPreferences("agent", MODE_PRIVATE).edit()
+                    .putBoolean("patch_enabled", on).apply();
+            log("热补丁 " + (on ? "已启用" : "已禁用") + "（重启 App 生效）");
+        });
+        patchCard.addView(patchEnableBox);
+        Button bRollback = smallBtn("↩️ 回滚上一个补丁");
+        bRollback.setOnClickListener(v -> {
+            if (!PatchManager.hasBackup(this)) {
+                log("没有可回滚的备份");
+                return;
+            }
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle("回滚热补丁？")
+                    .setMessage("将恢复到上一个补丁，重启 App 后生效。")
+                    .setPositiveButton("回滚", (d, w) -> {
+                        String err = PatchManager.rollbackPatch(this);
+                        if (err == null) {
+                            refreshPatch.run();
+                            log("已回滚，重启 App 生效");
+                        } else {
+                            log(err);
+                        }
+                    })
+                    .setNegativeButton("取消", null)
+                    .show();
+        });
+        patchCard.addView(bRollback);
+        inner.addView(patchCard);
+
+        // v3.11 Issue 8：记忆管理
+        LinearLayout memCard = card();
+        LinearLayout memHeader = new LinearLayout(this);
+        memHeader.setOrientation(LinearLayout.HORIZONTAL);
+        memHeader.setGravity(Gravity.CENTER_VERTICAL);
+        TextView memTitle = new TextView(this);
+        memTitle.setText("🧠 记忆管理");
+        memTitle.setTextSize(16);
+        memTitle.setTypeface(memTitle.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams memLp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        memHeader.addView(memTitle, memLp);
+        Button bViewMem = smallBtn("查看");
+        bViewMem.setOnClickListener(v -> showMemoryList());
+        memHeader.addView(bViewMem);
+        memCard.addView(memHeader);
+        memCard.addView(grayText("本地存储，不上传。App 记住的偏好和事实都在这里。"));
+        inner.addView(memCard);
 
 
         // v2.62：更多设置（可折叠）——监管者开关放这里，缩小
@@ -4053,6 +4701,85 @@ public class MainActivity extends Activity {
                         .putBoolean("adv", on).apply());
         agentAdvBox.setPadding(dp(4), 0, dp(4), dp(4));
         moreBody.addView(agentAdvBox);
+        // v3.10 Issue 4：远程高危动作策略
+        TextView remoteRiskLabel = new TextView(this);
+        remoteRiskLabel.setText("🛡️ 远程高危动作策略（HTTP/TG）");
+        remoteRiskLabel.setTextSize(10);
+        remoteRiskLabel.setTextColor(DyColor.onSurfaceVariant(this));
+        remoteRiskLabel.setPadding(dp(4), dp(4), dp(4), 0);
+        moreBody.addView(remoteRiskLabel);
+        android.widget.Spinner remoteRiskSpinner = new android.widget.Spinner(this);
+        String[] riskOptions = {"一律拒绝（默认）", "允许但记录"};
+        String[] riskValues = {"deny", "allow_log"};
+        android.widget.ArrayAdapter<String> riskAdapter =
+                new android.widget.ArrayAdapter<>(this,
+                        android.R.layout.simple_spinner_item, riskOptions);
+        riskAdapter.setDropDownViewResource(
+                android.R.layout.simple_spinner_dropdown_item);
+        remoteRiskSpinner.setAdapter(riskAdapter);
+        String curRisk = getSharedPreferences("agent", MODE_PRIVATE)
+                .getString("remote_risk_policy", "deny");
+        for (int i = 0; i < riskValues.length; i++) {
+            if (riskValues[i].equals(curRisk)) {
+                remoteRiskSpinner.setSelection(i);
+                break;
+            }
+        }
+        remoteRiskSpinner.setOnItemSelectedListener(
+                new android.widget.AdapterView.OnItemSelectedListener() {
+                    @Override
+                    public void onItemSelected(
+                            android.widget.AdapterView<?> p, android.view.View v,
+                            int pos, long id) {
+                        getSharedPreferences("agent", MODE_PRIVATE).edit()
+                                .putString("remote_risk_policy", riskValues[pos])
+                                .apply();
+                        log("远程高危策略 → " + riskOptions[pos]);
+                    }
+                    @Override
+                    public void onNothingSelected(
+                            android.widget.AdapterView<?> p) {}
+                });
+        moreBody.addView(remoteRiskSpinner);
+        // v3.14：审批全局悬浮窗开关
+        android.widget.CheckBox approveOverlayBox =
+                new android.widget.CheckBox(this);
+        approveOverlayBox.setText("🛡 审批用全局悬浮窗（虚拟屏任务时主屏弹窗）");
+        approveOverlayBox.setTextSize(10);
+        approveOverlayBox.setTextColor(DyColor.onSurfaceVariant(this));
+        approveOverlayBox.setChecked(
+                getSharedPreferences("agent", MODE_PRIVATE)
+                        .getBoolean("approve_overlay", true));
+        approveOverlayBox.setOnCheckedChangeListener((v, on) -> {
+            getSharedPreferences("agent", MODE_PRIVATE).edit()
+                    .putBoolean("approve_overlay", on).apply();
+            if (on && !ApproveOverlay.canShow(this)) {
+                new android.app.AlertDialog.Builder(this)
+                        .setTitle("需要悬浮窗权限")
+                        .setMessage("全局审批弹窗需要“悬浮窗”权限，去开启吗？")
+                        .setPositiveButton("去开启",
+                                (d, w) -> ApproveOverlay.openPermissionSettings(this))
+                        .setNegativeButton("稍后", null)
+                        .show();
+            }
+            log("全局审批悬浮窗 " + (on ? "已开启" : "已关闭"));
+        });
+        approveOverlayBox.setPadding(dp(4), dp(4), dp(4), dp(4));
+        moreBody.addView(approveOverlayBox);
+        // v3.14：任务默认虚拟屏开关
+        android.widget.CheckBox vdDefaultBox =
+                new android.widget.CheckBox(this);
+        vdDefaultBox.setText("🖥 任务默认在虚拟屏运行（需 root，主屏不受打扰）");
+        vdDefaultBox.setTextSize(10);
+        vdDefaultBox.setTextColor(DyColor.onSurfaceVariant(this));
+        vdDefaultBox.setChecked(
+                getSharedPreferences("agent", MODE_PRIVATE)
+                        .getBoolean("task_vd_default", true));
+        vdDefaultBox.setOnCheckedChangeListener((v, on) ->
+                getSharedPreferences("agent", MODE_PRIVATE).edit()
+                        .putBoolean("task_vd_default", on).apply());
+        vdDefaultBox.setPadding(dp(4), 0, dp(4), dp(4));
+        moreBody.addView(vdDefaultBox);
         // 监管者开关：默认开启，可关闭，设置持久化
         agentSupervisorBox = new android.widget.CheckBox(this);
         agentSupervisorBox.setText("🔍 监管者复核（任务结束后独立判定完成度）");
@@ -4825,9 +5552,12 @@ public class MainActivity extends Activity {
             row.setClickable(true);
             row.setFocusable(true);
             boolean active = pf.id.equals(llmStore.getActive().id);
+            LlmStore.Profile supPf = llmStore.supervisorProfile();
+            boolean isSup = supPf != null && pf.id.equals(supPf.id);
             TextView t = new TextView(this);
             t.setText((active ? "✓ " : "○ ") + pf.name
-                    + "（" + pf.provider + "/" + pf.model + "）");
+                    + "（" + pf.provider + "/" + pf.model + "）"
+                    + (isSup ? " · 🛡监管" : ""));
             t.setTextSize(14);
             t.setTextColor(active ? DyColor.primary(this) : DyColor.onSurface(this));
             if (active) t.setTypeface(t.getTypeface(),
@@ -4843,6 +5573,12 @@ public class MainActivity extends Activity {
                 refreshLlm();
                 refreshLlmProfiles();
                 log("已切换：" + np.name);
+            });
+            row.setOnLongClickListener(v -> {
+                llmStore.setSupervisorId(pid);
+                refreshLlmProfiles();
+                log("监管者模型已设为：" + pf.name + "（长按其他档案可改，默认主力）");
+                return true;
             });
             llmProfilesBox.addView(row);
         }
@@ -4864,6 +5600,14 @@ public class MainActivity extends Activity {
 
     protected void onResume() {
         super.onResume();
+        new Thread(() -> SedimentReport.checkSchedule(this)).start();
+        try {
+            if (getIntent() != null && getIntent().getBooleanExtra("open_sediment", false)) {
+                getIntent().removeExtra("open_sediment");
+                showSediment();
+            }
+        } catch (Exception ignored) {
+        }
         // 回到软件内：主动关闭任务悬浮窗（进度直接看界面）
         FloatWindow.setInApp(true);
         if (agentFloatHintRefresher != null) agentFloatHintRefresher.run();
@@ -4905,6 +5649,18 @@ public class MainActivity extends Activity {
      * 在后台线程调用，会阻塞等待用户选择。返回 true=继续。
      */
     private boolean askUserContinue(String reason) {
+        // v3.14：优先全局悬浮窗（虚拟屏任务时主屏也能决策）
+        boolean useOverlay = getSharedPreferences("agent", MODE_PRIVATE)
+                .getBoolean("approve_overlay", true);
+        if (useOverlay && ApproveOverlay.canShow(this)) {
+            int r = ApproveOverlay.askCustom(this, "⏳ 任务等待过长（全局）",
+                    reason + "\n是否继续执行？",
+                    new String[]{"继续执行", "停止任务"}, 1);
+            if (r == 1) agentStop = true;
+            boolean go = r == 0;
+            log(go ? "用户选择继续执行" : "用户选择停止任务（全局悬浮窗）");
+            return go;
+        }
         final boolean[] result = {false};
         final java.util.concurrent.CountDownLatch latch =
                 new java.util.concurrent.CountDownLatch(1);
@@ -5021,6 +5777,19 @@ public class MainActivity extends Activity {
      */
     private boolean askUserApprove(String action, String detail) {
         if (agentStop) return false;
+        // v3.14：优先全局悬浮窗（虚拟屏任务时主屏也能决策）
+        boolean useOverlay = getSharedPreferences("agent", MODE_PRIVATE)
+                .getBoolean("approve_overlay", true);
+        if (useOverlay && ApproveOverlay.canShow(this)) {
+            int r = ApproveOverlay.ask(this, action, detail);
+            if (r == ApproveOverlay.STOP_TASK) agentStop = true;
+            if (r == ApproveOverlay.ALLOW_ONCE) {
+                log("✅ 已批准（全局悬浮窗）：" + action);
+                return true;
+            }
+            log("⛔ 已拒绝（全局悬浮窗）：" + action);
+            return false;
+        }
         final boolean[] result = {false};
         final java.util.concurrent.CountDownLatch latch =
                 new java.util.concurrent.CountDownLatch(1);
