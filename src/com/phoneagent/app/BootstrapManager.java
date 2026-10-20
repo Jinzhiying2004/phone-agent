@@ -225,6 +225,8 @@ public class BootstrapManager {
                     }
                     Os.symlink(target, link.getAbsolutePath());
                 }
+                // 改写脚本 shebang：官方路径换成 staging 路径，免 root 也能直接跑脚本
+                fixShebangsIn(stage, stagePath);
                 // 原子替换
                 File dest = stagingDir();
                 deleteRecursive(dest);
@@ -373,6 +375,67 @@ public class BootstrapManager {
         }
         return "修复完成：改写 " + fixed + " 个链接，跳过 " + skipped + " 个";
     }
+
+    /** 修复已安装环境中脚本的 shebang（免 root 模式，官方路径改写为 staging 路径） */
+    public String fixShebangs() {
+        if (!isInstalled()) return "环境未安装";
+        int fixed = fixShebangsIn(stagingDir(),
+                stagingDir().getAbsolutePath());
+        return "shebang 修复完成：改写 " + fixed + " 个脚本";
+    }
+
+    // 遍历目录，把脚本首行 shebang 里的官方前缀改写成给定前缀；返回改写数
+    private static int fixShebangsIn(File root, String prefixPath) {
+        int fixed = 0;
+        java.util.Queue<File> q = new java.util.LinkedList<>();
+        q.add(root);
+        while (!q.isEmpty()) {
+            File dir = q.poll();
+            File[] files = dir.listFiles();
+            if (files == null) continue;
+            for (File f : files) {
+                if (f.isDirectory() && !isSymlink(f)) {
+                    q.add(f);
+                } else if (f.isFile() && !isSymlink(f)
+                        && f.length() > 2 && f.length() < 4194304) {
+                    try {
+                        byte[] all = new byte[(int) f.length()];
+                        boolean full = false;
+                        try (java.io.FileInputStream in =
+                                new java.io.FileInputStream(f)) {
+                            int off = 0;
+                            while (off < all.length) {
+                                int n = in.read(all, off, all.length - off);
+                                if (n < 0) break;
+                                off += n;
+                            }
+                            full = off >= all.length;
+                        }
+                        if (!full) continue;
+                        if (all[0] != '#' || all[1] != '!') continue;
+                        String text = new String(all, "UTF-8");
+                        int nl = text.indexOf('\n');
+                        String first = nl >= 0 ? text.substring(0, nl) : text;
+                        String want = "#!" + TERMUX_PREFIX;
+                        if (!first.startsWith(want)) continue;
+                        String out = "#!" + prefixPath
+                                + first.substring(want.length())
+                                + (nl >= 0 ? text.substring(nl) : "");
+                        boolean exec = f.canExecute();
+                        try (java.io.FileOutputStream os =
+                                new java.io.FileOutputStream(f)) {
+                            os.write(out.getBytes("UTF-8"));
+                        }
+                        if (exec) f.setExecutable(true, false);
+                        fixed++;
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+        }
+        return fixed;
+    }
+
 
     private static boolean isSymlink(File f) {
         try {
