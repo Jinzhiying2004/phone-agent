@@ -8,17 +8,16 @@ import android.os.Build;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.WindowManager;
-import android.widget.LinearLayout;
-import android.widget.TextView;
 
 /**
- * 任务进度悬浮窗：agent 运行时在屏幕上层实时显示进度。
+ * 任务运行指示：v3.40 起改为全屏流光边框（无文字胶囊）。
+ * 旧胶囊压在屏幕顶部正中，挡按钮视线且会吃掉落在它范围内的点击；
+ * 现在只沿屏幕边缘画一道流光，触摸全穿透——流光在转 = agent 在干活。
  * 需要 SYSTEM_ALERT_WINDOW 权限，无权限时静默跳过。
  */
 public class FloatWindow {
 
     private static android.view.View floatView;
-    private static TextView floatText;
     private static WindowManager wm;
     private static FlowLightDrawable flowLight;
     /** 主界面是否在前台：在前台时不弹悬浮窗（界面里已有进度） */
@@ -26,14 +25,48 @@ public class FloatWindow {
 
     public static void setInApp(boolean v) {
         inApp = v;
-        if (v) hide();
+        if (v) {
+            hide();
+        } else if (taskActive && taskCtx != null && floatView == null) {
+            // v3.39：任务进行中离开 App——补上发起时被前台吞掉的悬浮窗
+            show(taskCtx, taskTitle);
+        }
+    }
+
+    // v3.39：任务级登记——通道任务统一走 begin/end，
+    // 任务在 App 前台时发起也不丢窗（离开 App 自动补弹），异常收尾不残留
+    private static volatile boolean taskActive = false;
+    private static Context taskCtx;
+    private static String taskTitle = "";
+
+    public static void beginTask(Context ctx, String title) {
+        try {
+            taskCtx = ctx.getApplicationContext();
+            taskTitle = title == null ? "" : title;
+            taskActive = true;
+            new android.os.Handler(android.os.Looper.getMainLooper())
+                    .post(() -> {
+                        if (taskActive && !inApp && floatView == null) {
+                            show(taskCtx, taskTitle);
+                        }
+                    });
+        } catch (Exception ignored) {
+        }
+    }
+
+    public static void endTask(String text) {
+        taskActive = false;
+        try {
+            // 无文字版：结束 1.5 秒后收起流光
+            new android.os.Handler(android.os.Looper.getMainLooper())
+                    .postDelayed(FloatWindow::hide, 1500);
+        } catch (Exception ignored) {
+        }
     }
 
     public static boolean isInApp() {
         return inApp;
     }
-    private static final java.util.ArrayDeque<String> lines = new java.util.ArrayDeque<>();
-    private static final int MAX_LINES = 4;
 
     public static boolean hasPermission(Context ctx) {
         if (Build.VERSION.SDK_INT < 23) return true;
@@ -59,47 +92,28 @@ public class FloatWindow {
         hide();
         try {
             wm = (WindowManager) ac.getSystemService(Context.WINDOW_SERVICE);
-            LinearLayout layout = new LinearLayout(ac);
-            layout.setOrientation(LinearLayout.HORIZONTAL);
-            layout.setGravity(Gravity.CENTER_VERTICAL);
-            int pad = dp(ac, 10);
-            layout.setPadding(pad, dp(ac, 8), pad, dp(ac, 8));
-            // 流光边框：有流光=任务运行中
-            flowLight = new FlowLightDrawable(0xE6323232, 0xFF40C4FF,
-                    20, ac.getResources().getDisplayMetrics().density);
-            layout.setBackground(flowLight);
+            // v3.40：全屏流光边框——透明底、零圆角，只沿屏幕边缘流动；
+            // FLAG_NOT_TOUCHABLE 触摸全穿透，不挡任何按钮（胶囊版曾吃点击）
+            android.view.View glow = new android.view.View(ac);
+            flowLight = new FlowLightDrawable(android.graphics.Color.TRANSPARENT,
+                    0xFF40C4FF, 0,
+                    ac.getResources().getDisplayMetrics().density);
+            glow.setBackground(flowLight);
             flowLight.start();
-
-            TextView dot = new TextView(ac);
-            dot.setText("🤖");
-            dot.setTextSize(14);
-            layout.addView(dot);
-
-            floatText = new TextView(ac);
-            floatText.setTextSize(11);
-            floatText.setTextColor(0xFFFFFFFF);
-            floatText.setMaxLines(MAX_LINES);
-            floatText.setLineSpacing(dp(ac, 2), 1f);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                    dp(ac, 240), LinearLayout.LayoutParams.WRAP_CONTENT);
-            lp.setMargins(dp(ac, 6), 0, 0, 0);
-            layout.addView(floatText, lp);
-            lines.clear();
-            pushLine(text);
-
             int type = Build.VERSION.SDK_INT >= 26
                     ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                     : WindowManager.LayoutParams.TYPE_PHONE;
             WindowManager.LayoutParams params = new WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.WRAP_CONTENT,
-                    WindowManager.LayoutParams.WRAP_CONTENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
                     type,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                     PixelFormat.TRANSLUCENT);
-            params.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
-            params.y = dp(ac, 80);
-            floatView = layout;
+            params.gravity = Gravity.TOP | Gravity.START;
+            floatView = glow;
             wm.addView(floatView, params);
         } catch (Exception ignored) {
             floatView = null;
@@ -110,28 +124,21 @@ public class FloatWindow {
         pushLine(text);
     }
 
-    /** 流式追加一行，保留最近 MAX_LINES 行 */
+    /** v3.40 起无文字显示：pushLine 仅保留自愈（流光缺失时补上） */
     public static void pushLine(String text) {
-        if (floatText == null) return;
-        final String t = text == null ? "" : text;
-        floatText.post(() -> {
-            synchronized (lines) {
-                lines.addLast(t);
-                while (lines.size() > MAX_LINES) lines.removeFirst();
-                StringBuilder sb = new StringBuilder();
-                for (String l : lines) {
-                    if (sb.length() > 0) sb.append("\n");
-                    sb.append(l);
-                }
-                floatText.setText(sb.toString());
-            }
-        });
+        if (floatView == null && taskActive && !inApp && taskCtx != null) {
+            new android.os.Handler(android.os.Looper.getMainLooper())
+                    .post(() -> {
+                        if (taskActive && !inApp && floatView == null) {
+                            show(taskCtx, taskTitle);
+                        }
+                    });
+        }
     }
 
     /**
-     * 本地/远控共用：从 agent 日志行提取适合悬浮窗显示的一行
-     *（步骤/思考/关键动作，截断到 22 字内）。不适合显示返回 null。
-     * 纯逻辑，可 JVM 单测。
+     * 从 agent 日志行提取关键行（步骤/思考/关键动作）。v3.40 起悬浮层无文字，
+     * 此方法保留供通道侧判断"有关键进展"用，返回值不再渲染。
      */
     public static String briefLine(String msg) {
         if (msg == null) return null;
@@ -164,11 +171,7 @@ public class FloatWindow {
         } catch (Exception ignored) {
         }
         floatView = null;
-        floatText = null;
         wm = null;
-        synchronized (lines) {
-            lines.clear();
-        }
     }
 
     private static int dp(Context ctx, int v) {
