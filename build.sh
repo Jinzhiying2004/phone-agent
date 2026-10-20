@@ -22,6 +22,19 @@ for path, b64 in icons.items():
         print('已还原图标', path)
 EOF
 
+# vdinput.dex：虚拟屏输入注入（root 下经 app_process 调用），二进制不进推送管线；
+# 缺失或源码更新时自动从 tools/VdInput.java + VdTap.java 重编。
+if [ ! -f assets/vdinput.dex ] || [ tools/VdInput.java -nt assets/vdinput.dex ] || [ tools/VdTap.java -nt assets/vdinput.dex ]; then
+  echo "== vdinput.dex 重编 =="
+  mkdir -p $OUT/vdinput_classes $OUT/vdinput_dex
+  javac -encoding UTF-8 -source 8 -target 8 -nowarn -classpath $PLAT -d $OUT/vdinput_classes \
+    tools/VdInput.java tools/VdTap.java
+  $BT/d8 --min-api 26 --lib $PLAT --output $OUT/vdinput_dex \
+    $(find $OUT/vdinput_classes -name "*.class")
+  cp $OUT/vdinput_dex/classes.dex assets/vdinput.dex
+  echo "vdinput.dex 已生成"
+fi
+
 rm -rf $OUT && mkdir -p $OUT/compiled $OUT/gen $OUT/classes $OUT/dex
 
 echo "== 1/6 aapt2 compile =="
