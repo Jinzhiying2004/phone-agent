@@ -51,7 +51,7 @@ public class ActionRisk {
         put(Level.LOW, "wait_text", "assert_text", "sleep", "screenshot",
                 "app_list", "sys_get", "getprop", "ps", "remember");
         // MEDIUM：设备控制 / 本地读
-        put(Level.MEDIUM, "tap", "tap_text", "tap_id", "swipe", "back",
+        put(Level.MEDIUM, "tap", "tap_text", "tap_id", "swipe", "back", "home",
                 "input", "launch", "read_file", "use_card", "skill",
                 "screen", "brightness", "volume", "vibrate", "torch",
                 "wifi", "bluetooth", "app_kill");
