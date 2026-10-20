@@ -30,9 +30,17 @@ public class Supervisor {
 
     public static Verdict review(LlmClient client, String goal, boolean workerSaid,
                                  String history, String finalScreen) {
+        return review(client, goal, workerSaid, history, finalScreen, null);
+    }
+
+    /** v3.38：带最终截图的复核（完成与否由监管者看图裁定） */
+    public static Verdict review(LlmClient client, String goal, boolean workerSaid,
+                                 String history, String finalScreen,
+                                 android.graphics.Bitmap finalShot) {
         Verdict v = new Verdict();
         try {
-            String prompt = "你是手机自动化任务的监管者，负责独立复核任务完成情况。\n\n"
+            String prompt = "你是手机自动化任务的监管者，负责独立复核任务完成情况。"
+                    + (finalShot != null ? "已附任务结束时的手机截图，结合截图判断。" : "") + "\n\n"
                     + "用户目标：" + goal + "\n"
                     + "执行 agent 自认：" + (workerSaid ? "已完成" : "未完成") + "\n"
                     + "执行过程：\n" + history + "\n"
@@ -50,7 +58,15 @@ public class Supervisor {
                     + "\"review\":\"一句话结果点评\","
                     + "\"missing\":\"具体缺什么（无则空字符串）\","
                     + "\"next_action\":\"建议的具体下一步（无则空字符串）\"}";
-            LlmClient.Result r = client.chat(prompt);
+            LlmClient.Result r = null;
+            if (finalShot != null) {
+                try {
+                    r = client.chatVision(prompt, finalShot, "");
+                } catch (Exception ignored) {
+                    r = null;
+                }
+            }
+            if (r == null || !r.ok) r = client.chat(prompt);
             if (!r.ok) return v;
             JSONObject o = AgentLoop.extractJson(r.text);
             if (o == null) return v;
@@ -105,6 +121,66 @@ public class Supervisor {
         } catch (Exception e) {
             return null;
         }
+    }
+
+
+    /** 介入裁决结果 */
+    public static class Intervention {
+        /** guide=给指引继续 / abort=判定中止 / continue=无异常放行 */
+        public String action = "continue";
+        public String message = "";
+        public boolean ok = false;
+    }
+
+    /**
+     * 执行中介入裁决：执行 agent 疑似死循环/卡住/幻觉时由监管者（最强模型）判断。
+     * 与 monitor 不同：这里握有中止权，目标客观不可达或幻觉无路时判 abort。
+     */
+    public static Intervention intervene(LlmClient client, String goal,
+                                         String trigger, String recent,
+                                         String thoughts,
+                                         android.graphics.Bitmap lastShot) {
+        Intervention it = new Intervention();
+        try {
+            String prompt = "你是手机自动化任务的监管者。执行 agent 正在执行任务，"
+                    + "本地监测发现异常，现在由你裁决。"
+                    + (lastShot != null ? "已附上它最新一次看屏的截图，结合截图判断。"
+                    : "") + "\n\n"
+                    + "用户目标：" + goal + "\n"
+                    + "触发原因：" + trigger + "\n"
+                    + "最近执行记录（工具 → 结果）：\n" + recent + "\n"
+                    + "执行 agent 最近的想法与动作：\n" + thoughts + "\n\n"
+                    + "判断要点：无用循环不只是重复同一个动作——换着花样做无效尝试、"
+                    + "界面长时间没有变化、离目标没有更近，都算原地打转；"
+                    + "结合截图看它是不是在臆想不存在的界面元素（幻觉）、"
+                    + "有没有错过显而易见的入口。\n"
+                    + "请判断属于哪种情况，只输出纯 JSON：\n"
+                    + "{\"action\":\"guide|abort|continue\",\"message\":\"...\"}\n"
+                    + "- continue：执行其实正常，或小问题它自己能纠正，message 写一句判断即可\n"
+                    + "- guide：它走偏了、在打转或在臆想界面元素，message 给它明确具体的新做法"
+                    + "（指出错在哪、应该改做什么，不要空泛地说继续努力）\n"
+                    + "- abort：目标客观上无法完成，或它在基于不存在的界面元素反复尝试"
+                    + "且没有可行的路，message 写明无法完成的原因（这是给用户看的）";
+            LlmClient.Result r = null;
+            if (lastShot != null) {
+                try {
+                    r = client.chatVision(prompt, lastShot, "");
+                } catch (Exception ignored) {
+                    r = null;
+                }
+            }
+            if (r == null || !r.ok) r = client.chat(prompt);
+            if (!r.ok) return it;
+            JSONObject o = AgentLoop.extractJson(r.text);
+            if (o == null) return it;
+            String a = o.optString("action", "continue");
+            if (!"guide".equals(a) && !"abort".equals(a)) a = "continue";
+            it.action = a;
+            it.message = o.optString("message", "");
+            it.ok = true;
+        } catch (Exception ignored) {
+        }
+        return it;
     }
 
     /** 生成给 agent 的结构化反馈（聪明指导，而非"继续"二字） */
