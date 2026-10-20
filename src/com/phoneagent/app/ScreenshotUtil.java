@@ -18,24 +18,32 @@ public class ScreenshotUtil {
      * 避免无障碍截屏失败的机型上视觉能力直接瘫痪。
      * 都失败返回 null。
      */
+    /**
+     * v3.28：通道优先级 root > 无障碍（保底）。
+     * 有 root 时 root screencap 优先（MIUI 无障碍截屏常被系统拦截）；
+     * 无 root 时降级无障碍截屏。
+     */
     public static Bitmap capture(android.content.Context ctx) {
+        // 优先：root screencap
+        try {
+            if (Root.findSu() != null) {
+                java.io.File f = new java.io.File(ctx.getCacheDir(), "shot_eye.png");
+                if (f.exists()) f.delete();
+                Process p = Root.exec("screencap -p " + f.getAbsolutePath());
+                if (p != null) p.waitFor();
+                if (f.exists() && f.length() > 0) {
+                    Bitmap bmp = android.graphics.BitmapFactory.decodeFile(
+                            f.getAbsolutePath());
+                    f.delete();
+                    if (bmp != null) return bmp;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        // 保底：无障碍截屏
         try {
             Bitmap bmp = AgentAccessibilityService.screenshot();
             if (bmp != null) return bmp;
-        } catch (Exception ignored) {
-        }
-        // 兜底：root screencap
-        try {
-            java.io.File f = new java.io.File(ctx.getCacheDir(), "shot_eye.png");
-            if (f.exists()) f.delete();
-            Process p = Root.exec("screencap -p " + f.getAbsolutePath());
-            if (p != null) p.waitFor();
-            if (f.exists() && f.length() > 0) {
-                Bitmap bmp = android.graphics.BitmapFactory.decodeFile(
-                        f.getAbsolutePath());
-                f.delete();
-                return bmp;
-            }
         } catch (Exception ignored) {
         }
         return null;
