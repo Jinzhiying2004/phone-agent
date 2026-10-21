@@ -130,6 +130,9 @@ public class TgBot {
         long chatId = msg.optJSONObject("chat") != null
                 ? msg.optJSONObject("chat").optLong("id", 0) : 0;
         String text = msg.optString("text", "").trim();
+        // v3.49：记住触发这条指令的消息 id，执行完的自动回复引用它（reply_parameters），
+        // 用户一眼看出是哪条指令的结果
+        long incomingId = msg.optLong("message_id", 0);
         if (chatId == 0 || text.isEmpty()) return;
 
         // 主人绑定
@@ -164,7 +167,7 @@ public class TgBot {
                     sendMessage(chatId, "🆕 新对话开始了，之前的上下文已清空。想让我做什么？");
                 } else {
                     sendMessage(chatId, "🆕 新对话开始了，上下文已清空。");
-                    runAgentCmd(chatId, rest);
+                    runAgentCmd(chatId, rest, incomingId);
                 }
             } else if (text.equals("/shot")) {
                 sendMessage(chatId, "截屏中…");
@@ -183,11 +186,11 @@ public class TgBot {
                     sendMessage(chatId, "🛑 已请求停止，正在打断…");
                 }
             } else if (text.startsWith("/task")) {
-                runTaskCmd(chatId, text.substring(5).trim());
+                runTaskCmd(chatId, text.substring(5).trim(), incomingId);
             } else if (text.startsWith("/agent")) {
-                runAgentCmd(chatId, text.substring(6).trim());
+                runAgentCmd(chatId, text.substring(6).trim(), incomingId);
             } else {
-                runAgentCmd(chatId, text); // 直接发文字 = 智能执行
+                runAgentCmd(chatId, text, incomingId); // 直接发文字 = 智能执行
             }
         } catch (Exception e) {
             sendMessage(chatId, "执行异常：" + e.getMessage());
@@ -202,7 +205,8 @@ public class TgBot {
                 + "/stop —— 强行打断当前任务\n"
                 + "/task {\"steps\":[...]} —— 执行任务 JSON\n"
                 + "/agent 打开微信 —— AI 看屏自动操控\n"
-                + "直接发文字 = /agent\n\n"
+                + "直接发文字 = /agent\n"
+                + "执行完的结果会自动引用你那条指令回复\n\n"
                 + "解绑：在 App 里点「解绑主人」";
     }
 
@@ -216,8 +220,12 @@ public class TgBot {
                 + "Telegram：运行中 ✅";
     }
 
-    /** /task：执行任务 JSON */
     private void runTaskCmd(long chatId, String json) {
+        runTaskCmd(chatId, json, 0);
+    }
+
+    /** /task：执行任务 JSON（v3.49：结果引用触发消息回复） */
+    private void runTaskCmd(long chatId, String json, long replyTo) {
         if (json.isEmpty()) {
             sendMessage(chatId, "用法：/task {\"steps\":[...]}");
             return;
@@ -234,11 +242,11 @@ public class TgBot {
         try {
             ok = runner.run(json);
         } catch (Exception e) {
-            sendMessage(chatId, "任务解析失败：" + e.getMessage());
+            sendMessage(chatId, "任务解析失败：" + e.getMessage(), replyTo);
             return;
         }
         sendMessage(chatId, (ok ? "✅ 任务完成\n\n" : "⏹ 任务结束（未完成）\n\n")
-                + trimLog(logs.toString()));
+                + trimLog(logs.toString()), replyTo);
     }
 
     // v3.43：像反馈/陈述的句子（「没打开」「登录退了」「完成了，不过…」）不是新指令，
@@ -262,8 +270,12 @@ public class TgBot {
         return goal;
     }
 
-    /** /agent：AI 看屏自动操控 */
     private void runAgentCmd(long chatId, String goal) {
+        runAgentCmd(chatId, goal, 0);
+    }
+
+    /** /agent：AI 看屏自动操控（v3.49：进度与结果引用触发消息回复） */
+    private void runAgentCmd(long chatId, String goal, long replyTo) {
         if (goal.isEmpty()) {
             sendMessage(chatId, "用法：/agent 打开时钟设个 7 点的闹钟");
             return;
@@ -303,7 +315,7 @@ public class TgBot {
  + "【重要】你现在是纯聊天模式、没有任何操作手机的工具，绝不能声称已经帮用户"
                     + "打开/关闭/设置/发送/删除了任何东西；如果用户是在让你操作手机，"
                     + "直接告诉他：把这条单独发给我，我按任务执行。";
-            final long msgId = sendMessageReturnId(chatId, "🤖 …");
+            final long msgId = sendMessageReturnId(chatId, "🤖 …", replyTo);
             final StringBuilder full = new StringBuilder("🤖 ");
             final long[] lastEdit = {0};
             final long[] lastTyping = {0};
@@ -343,7 +355,7 @@ public class TgBot {
         }
         // v3.43：意图门——反馈/陈述句不原样当目标，给 agent 加核实框架
         final String execGoal = wrapFeedbackGoal(goal);
-        sendMessage(chatId, "🎯 收到：" + goal + "\n开始执行…");
+        sendMessage(chatId, "🎯 收到：" + goal + "\n开始执行…", replyTo);
         // v3.06：任务执行时也显示 typing
         sendTyping(chatId);
         // v3.32：三通道真互斥——App/远控占用时不再并发抢屏
@@ -357,7 +369,7 @@ public class TgBot {
         tgTaskRunning = true;
         // v3.32：任务移到工作线程——之前在轮询线程同步执行，
         // 任务期间（最长 5 分钟）/stop 与任何消息都收不进来
-        new Thread(() -> runAgentTask(chatId, execGoal), "tg-agent").start();
+        new Thread(() -> runAgentTask(chatId, execGoal, replyTo), "tg-agent").start();
     }
 
     // v3.36：TG 任务也要有悬浮窗提示（与远控同款）
@@ -370,11 +382,12 @@ public class TgBot {
         FloatWindow.endTask(text);
     }
 
-    private void runAgentTask(long chatId, String goal) {
+    private void runAgentTask(long chatId, String goal, long replyTo) {
         StringBuilder logs = new StringBuilder();
         // v3.37：过程直播——一条消息原地编辑，实时显示执行到哪一步
+        // v3.49：进度消息引用触发指令（reply_parameters），执行完的总结编辑同一条，天然挂在原指令下
         final long progressId = sendMessageReturnId(chatId,
-                "🎯 " + goal + "\n⏳ 开始执行…");
+                "🎯 " + goal + "\n⏳ 开始执行…", replyTo);
         final long progStart = System.currentTimeMillis();
         final int[] progSteps = {0};
         final long[] progLastEdit = {0};
@@ -433,7 +446,7 @@ public class TgBot {
             if (progressId > 0) {
                 editMessage(chatId, progressId, "❌ 执行异常：" + e.getMessage());
             }
-            sendMessage(chatId, "执行异常：" + e.getMessage());
+            sendMessage(chatId, "执行异常：" + e.getMessage(), replyTo);
             floatEnd("❌ TG任务异常");
             tgTaskRunning = false;
             TaskLock.release("tg");
@@ -551,11 +564,21 @@ public class TgBot {
     }
 
     private void sendMessage(long chatId, String text) {
-        sendMessageReturnId(chatId, text);
+        sendMessage(chatId, text, 0);
+    }
+
+    /** v3.49：发送并引用某条消息回复（replyTo>0 时带 reply_parameters） */
+    private void sendMessage(long chatId, String text, long replyTo) {
+        sendMessageReturnId(chatId, text, replyTo);
     }
 
     /** v3.02：发送并返回 message_id（用于流式编辑） */
     private long sendMessageReturnId(long chatId, String text) {
+        return sendMessageReturnId(chatId, text, 0);
+    }
+
+    /** v3.49：同上，replyTo>0 时引用触发消息（执行完的自动回复挂在原指令下） */
+    private long sendMessageReturnId(long chatId, String text, long replyTo) {
         if (text == null || text.isEmpty()) return 0;
         long msgId = 0;
         try {
@@ -564,6 +587,10 @@ public class TgBot {
                 String part = text.substring(i, Math.min(i + MSG_LIMIT, text.length()));
                 String params = "chat_id=" + chatId
                         + "&text=" + URLEncoder.encode(part, "UTF-8");
+                if (replyTo > 0) {
+                    params += "&reply_parameters=" + URLEncoder.encode(
+                            "{\"message_id\":" + replyTo + "}", "UTF-8");
+                }
                 URL url = new URL(API + store.getToken() + "/sendMessage");
                 HttpURLConnection c = (HttpURLConnection) url.openConnection();
                 c.setRequestMethod("POST");

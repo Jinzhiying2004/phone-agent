@@ -94,10 +94,21 @@ public class RootShell {
                         if (line.endsWith("\r")) {
                             line = line.substring(0, line.length() - 1);
                         }
-                        if (line.startsWith(marker)) {
+                        // p157-p4：marker 改行内包含匹配。
+                        // 根因（2026-10-21 实测定位）：上一个命令的输出若无
+                        // 尾换行，下一个命令的 echo 回显 marker 会与输出粘成
+                        // 同一行，行首匹配永远命中不了，必 30 秒超时
+                        // （典型：cat 读 llm_profiles.json 等无尾换行文件）。
+                        int mIdx = line.indexOf(marker);
+                        if (mIdx >= 0) {
+                            String before = line.substring(0, mIdx);
+                            if (!before.isEmpty()) {
+                                out.append(before).append('\n');
+                            }
                             try {
                                 code = Integer.parseInt(
-                                        line.substring(marker.length()).trim());
+                                        line.substring(mIdx + marker.length())
+                                                .trim());
                             } catch (NumberFormatException ignored) {
                             }
                             done = true;

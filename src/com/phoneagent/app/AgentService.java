@@ -63,6 +63,7 @@ public class AgentService extends Service {
     }
 
     private AgentHttpServer http;
+    private PetController pet;
     private android.os.Handler schedHandler;
 
     private final Runnable schedTick = new Runnable() {
@@ -137,6 +138,12 @@ public class AgentService extends Service {
             installRootWatchdog();
             // v3.05：TG 机器人随服务自启（后台真运行）
             tryStartTgBot();
+            // v3.48：待机光效「M 八爪鱼」
+            try {
+                pet = new PetController(this);
+                pet.start();
+            } catch (Exception ignored) {
+            }
         } catch (Exception e) {
             stopSelf();
         }
@@ -272,6 +279,7 @@ public class AgentService extends Service {
     @Override
     public void onDestroy() {
         running = false;
+        if (pet != null) pet.stop();
         // v3.05：服务销毁时停 TG
         stopTgBot();
         instance = null;

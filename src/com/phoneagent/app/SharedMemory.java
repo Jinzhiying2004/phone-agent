@@ -148,6 +148,12 @@ if (j >= 0.15) scored.add(new double[]{j, i});
 if (scored.isEmpty()) return "";
 scored.sort((a, b) -> Double.compare(b[0], a[0]));
 StringBuilder sb = new StringBuilder();
+// p157-p4：内部参考头——模型曾把注入经验复述进最终答案
+// （2026-10-21 AutoGLM 对比实锤：询问手机参数的答案尾巴上多了一段
+// 无关的 Clash 经验）。注入只进任务上下文，明确禁入最终答案。
+sb.append("【内部参考·勿向用户复述：以下为三端历史任务经验，仅供本次任务"
++ "规划借鉴；与本次任务无关的条目请忽略，最终回答用户时不要引用或"
++ "复述这段内容。】\n");
 sb.append("\n");
 boolean hasFail = false;
 int n = Math.min(2, scored.size());

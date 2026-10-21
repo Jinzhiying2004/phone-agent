@@ -4808,6 +4808,37 @@ public class MainActivity extends Activity {
                         .putBoolean("task_vd_default", on).apply());
         vdDefaultBox.setPadding(dp(4), 0, dp(4), dp(4));
         moreBody.addView(vdDefaultBox);
+        // v3.48：待机光效「M 八爪鱼」开关
+        android.widget.CheckBox petBox =
+                new android.widget.CheckBox(this);
+        petBox.setText("🐙 待机光效「M八爪鱼」（空闲时在桌面沿光轨活动）");
+        petBox.setTextSize(10);
+        petBox.setTextColor(DyColor.onSurfaceVariant(this));
+        petBox.setChecked(
+                getSharedPreferences("agent", MODE_PRIVATE)
+                        .getBoolean("pet_enabled", true));
+        petBox.setOnCheckedChangeListener((v, on) -> {
+            getSharedPreferences("agent", MODE_PRIVATE).edit()
+                    .putBoolean("pet_enabled", on).apply();
+            if (on && !FloatWindow.hasPermission(this)) {
+                FloatWindow.requestPermission(this);
+            }
+        });
+        petBox.setPadding(dp(4), 0, dp(4), dp(4));
+        moreBody.addView(petBox);
+        android.widget.CheckBox petDeskBox =
+                new android.widget.CheckBox(this);
+        petDeskBox.setText("🐙 八爪鱼仅在桌面显示（关掉则任何界面空闲时都可能出现）");
+        petDeskBox.setTextSize(10);
+        petDeskBox.setTextColor(DyColor.onSurfaceVariant(this));
+        petDeskBox.setChecked(
+                getSharedPreferences("agent", MODE_PRIVATE)
+                        .getBoolean("pet_desktop_only", true));
+        petDeskBox.setOnCheckedChangeListener((v, on) ->
+                getSharedPreferences("agent", MODE_PRIVATE).edit()
+                        .putBoolean("pet_desktop_only", on).apply());
+        petDeskBox.setPadding(dp(4), 0, dp(4), dp(4));
+        moreBody.addView(petDeskBox);
         // 监管者开关：默认开启，可关闭，设置持久化
         agentSupervisorBox = new android.widget.CheckBox(this);
         agentSupervisorBox.setText("🔍 监管者复核（任务结束后独立判定完成度）");
