@@ -164,6 +164,7 @@ Supervisor.Verdict fv = finalReview(goal, false, lastHistory);
 if (fv != null && fv.ok && fv.completed) {
 log("🔍 监管者改判：目标实际已达成（约 " + fv.progressPct + "%）");
 ok = true;
+if (taskLogger != null) taskLogger.correctFinish(true, "监管者终审改判完成（约 " + fv.progressPct + "%），最终结果以完成为准，与遥测 task_end 一致");
 }
 }
 try {
@@ -310,6 +311,20 @@ int actionsDone = 0; // 实际执行的工具数（不含 observe）
 int textOnlyStrikes = 0; // 零动作想结束的次数
 int mutationsDone = 0; // v3.43：成功的状态改变类工具数（完成硬门槛用）
 int zeroMutStrikes = 0; // v3.43：只有观察/空转却想结束的次数
+int adWaits = 0; // 广告预算：奖励类任务的长等待（看广告）次数
+boolean rewardGoal = goal.contains("广告") || goal.contains("奖励")
+|| goal.contains("免费") || goal.contains("领取");
+int adBudget = 4;
+try {
+adBudget = ctx.getSharedPreferences("agent", Context.MODE_PRIVATE)
+.getInt("ad_budget_per_task", 4);
+} catch (Exception ignored) {
+}
+boolean claimSeen = false; // 硬停止线：已出现「领取成功/已领取」证据
+int claimTurn = 0;
+int postClaimActs = 0; // 证据出现后又执行的状态改变动作数
+int upsellWarns = 0; // 链条推销（再看N个提前得…）已提醒次数
+boolean engagedApp = false; // 已有真实应用内操作（launch/tap/vision 等），防说明文本误触发证据扫描
 int turn = 0;
 // v3.35 监管看门狗状态：只在死循环/连续失败/幻觉信号时请最强模型介入
 java.util.List<String> wdSigs = new java.util.ArrayList<>();
@@ -367,6 +382,11 @@ if (tr.text!= null &&!tr.text.trim().isEmpty()) {
 if (streamOutput()) log("💭 " + tr.text.trim());
 if (taskLogger!= null) taskLogger.think(tr.text.trim());
 hist.append("💭 ").append(tr.text.trim()).append("\n");
+if (rewardGoal && engagedApp && !claimSeen && hasClaimEvidence(tr.text)) {
+claimSeen = true;
+claimTurn = turn;
+log("🎯 检测到领取成功证据（执行者叙述），硬停止线已触发");
+}
 }
 
 if (tr.calls.isEmpty()) {
@@ -469,6 +489,7 @@ continue;
 }
 
 // 执行本轮工具调用
+boolean upsellSeen = false;
 for (JSONObject call: tr.calls) {
 if (listener!= null && listener.isStopped()) {
 stoppedByUser = true;
@@ -491,8 +512,43 @@ actionsDone++;
 lastActionsDone = actionsDone;
 }
 if (ex.ok && isMutationTool(name)) {
+// 说明型卡只回说明、没执行任何动作，不算状态改变（防冒充已执行）
+boolean prose = "use_card".equals(name) && ex.text != null
+&& ex.text.contains("说明型技能卡");
+if (!prose) {
 mutationsDone++;
 lastMutationsDone = mutationsDone;
+}
+}
+if (ex.ok && ("launch".equals(name) || "tap".equals(name)
+|| "tap_text".equals(name) || "vision".equals(name)
+|| "input".equals(name) || "swipe".equals(name))) engagedApp = true;
+if (rewardGoal && !"use_card".equals(name)) {
+// use_card 返回的是卡片说明文本，含「领取成功」等教学措辞，扫它必误触发
+if (!claimSeen && hasClaimEvidence(ex.text)) {
+claimSeen = true;
+claimTurn = turn;
+log("🎯 检测到领取成功证据（界面/工具结果），硬停止线已触发");
+}
+if (hasUpsell(ex.text)) upsellSeen = true;
+if (claimSeen && turn > claimTurn && (isMutationTool(name) || "sleep".equals(name))) postClaimActs++;
+}
+if (rewardGoal && "sleep".equals(name) && ex.ok) {
+int secs = 0;
+try {
+secs = new JSONObject(argsJson).optInt("s", 0);
+} catch (Exception ignored) {
+}
+if (secs >= 8) {
+adWaits++;
+log("📺 广告等待计数：" + adWaits + "/" + adBudget);
+if (adWaits > adBudget) {
+log("⛔ 广告预算超限：已等待 " + adWaits + " 次长广告，奖励链条可能无止境，任务中止（如今日奖励已到账，监管者终审会改判完成）");
+if (taskLogger != null) taskLogger.finish(false, "广告预算超限（已看 " + adWaits + " 次广告）");
+lastHistory = hist.toString();
+return false;
+}
+}
 }
 // v3.35 看门狗记录：动作签名/成败/结果摘要（监管介入时回放）
 if (!"observe".equals(name)) {
@@ -567,6 +623,52 @@ im.put("image_b64", bitmapToJpegB64(ex.shot));
 messages.put(im);
 try { ex.shot.recycle();} catch (Exception ignored) {}
 }
+} catch (Exception ignored) {
+}
+}
+// 硬停止线执行：领取证据已出现还继续操作 → 提醒收尾；再犯强制截停并终审裁定
+if (claimSeen) {
+try {
+JSONObject hm = new JSONObject();
+hm.put("role", "user");
+hm.put("content", "【系统硬停止线】已有证据显示本次目标对象已领取成功。"
++ "『再看N个提前得明日/第X+1日』是目标外链条推销，禁止跟进。"
++ "现在只做收尾：关掉广告/弹窗（有『坚持退出』点它），然后用文字回复报告完成，"
++ "不要再看任何广告、不要再点任何奖励入口。");
+messages.put(hm);
+} catch (Exception ignored) {
+}
+if (postClaimActs >= 2) {
+log("🛑 领取成功后执行者仍继续操作 " + postClaimActs + " 次，强制截停并终审");
+Supervisor.Verdict cfv = supervisorEnabled ? finalReview(goal, false, hist.toString()) : null;
+if (cfv == null || !cfv.ok || cfv.completed) {
+if (taskLogger != null) taskLogger.finish(true, "已领取（领取成功证据截停）");
+lastHistory = hist.toString();
+return true;
+}
+log("🔍 终审认为尚未完成（" + cfv.progressPct + "%），撤销硬停止线，按终审意见继续");
+claimSeen = false;
+postClaimActs = 0;
+try {
+JSONObject rm2 = new JSONObject();
+rm2.put("role", "user");
+rm2.put("content", "【监管者终审】刚才的领取证据不构成目标完成。还缺："
++ cfv.missing + "。请只补缺失部分，不要重复已完成步骤。");
+messages.put(rm2);
+} catch (Exception ignored) {
+}
+}
+}
+if (upsellSeen && upsellWarns < 2) {
+upsellWarns++;
+log("🎯 检测到链条推销（再看N个提前得…），已提醒不跟进（第 " + upsellWarns + " 次）");
+try {
+JSONObject um = new JSONObject();
+um.put("role", "user");
+um.put("content", "【系统提示】界面出现『再看N个视频/广告提前得明日/下一日奖励』——这是目标外链条推销。"
++ "不要点『再看』继续看；点『坚持退出』或关闭弹窗。"
++ "若本次目标对象还没领取，回到正常领取流程；已领取就收尾报告。");
+messages.put(um);
 } catch (Exception ignored) {
 }
 }
@@ -703,6 +805,7 @@ p.append("本任务在主屏执行，直接操作即可。");
 }
 p.append("先理解用户真正要什么再动手：结合对话上下文和当前界面理解指代与言外之意，按目标推进，不要逐字死磕字面步骤；此路不通时换方法继续朝目标走。");
 p.append("\n你通过工具看屏和操作（执行通道 root 优先，无 root 才用无障碍）。完成任务后，用一段文字回复用户结果（不再调工具即结束）。");
+p.append("领取/奖励类任务的停止线：界面出现『领取成功/已领取』就代表本次目标对象已到账，立即收尾报告；『再看N个提前得明日/下一份』是 App 的链条推销，属于目标外，一律不跟进，点『坚持退出』退出。");
 String cards = skillCardsSection(goal);
 if (!cards.isEmpty()) p.append("\n").append(cards);
 if (!conversationContext.isEmpty()) {
@@ -787,6 +890,19 @@ while (messages.length() > 0) messages.remove(0);
 for (int i = 0; i < kept.length(); i++) messages.put(kept.getJSONObject(i));
 } catch (Exception ignored) {
 }
+}
+
+/** 领取成功证据（硬停止线）：只认明确的完成态措辞 */
+private static boolean hasClaimEvidence(String s) {
+if (s == null) return false;
+return s.contains("领取成功") || s.contains("已领取") || s.contains("领取完成");
+}
+
+/** 链条推销信号：「再看N个提前得明日/第X+1日」类目标外诱导 */
+private static boolean hasUpsell(String s) {
+if (s == null) return false;
+return s.contains("提前得") || s.contains("提前解锁") || s.contains("提前获得")
+|| (s.contains("再看") && s.contains("提前"));
 }
 
 /** v3.43：状态改变类工具（完成硬门槛只认这些的成功调用） */

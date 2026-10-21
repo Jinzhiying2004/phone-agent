@@ -94,6 +94,18 @@ public class TaskRunLogger {
         flush();
     }
 
+    /** 更正结尾：终审改判等场景追加更正段，避免日志结尾与最终结果（遥测/远控）口径不一致 */
+    public synchronized void correctFinish(boolean ok, String note) {
+        String endTs = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss",
+                Locale.getDefault()).format(new Date());
+        sb.append("\n════════ 更正 ").append(endTs).append(" ════════\n");
+        sb.append("最终结果更正为：任务").append(ok ? "完成" : "未完成").append("\n");
+        if (note != null && !note.isEmpty()) {
+            sb.append(note).append("\n");
+        }
+        flush();
+    }
+
     private void flush() {
         try (FileWriter w = new FileWriter(logFile, false)) {
             w.write(sb.toString());

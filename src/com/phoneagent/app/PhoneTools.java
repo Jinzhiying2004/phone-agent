@@ -208,7 +208,7 @@ public class PhoneTools {
             String out = runner.getLastOutput();
             e.ok = ok;
             StringBuilder sb = new StringBuilder(ok ? "成功" : "失败");
-            if (out != null && !out.isEmpty()) sb.append("：").append(trim(out, 600));
+            if (out != null && !out.isEmpty()) sb.append("：").append(trim(out, "use_card".equals(name) ? 2600 : 600));
             // DSH 式富上下文：失败带恢复信息，成功带新状态摘要
             String extra = enrich(ctx, name, argsJson, ok, vdMode);
             if (!extra.isEmpty()) sb.append("\n").append(extra);

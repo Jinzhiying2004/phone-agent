@@ -1357,6 +1357,18 @@ public class TaskRunner {
                     JSONArray csteps = null;
                     String ct = card.content == null ? ""
                             : card.content.trim();
+                    boolean proseCard = !(ct.startsWith("[") || ct.startsWith("{"));
+                    if (proseCard) {
+                        // 说明型卡：content 是自然语言操作说明（非步骤 JSON），
+                        // 不是执行失败——把全文作为指令回给 agent 按说明逐步执行
+                        lastOutput = "说明型技能卡《" + card.name
+                                + "》：本卡是操作说明，未自动执行任何动作。"
+                                + "请严格按下述说明、用你自己的工具逐步完成，"
+                                + "结束条件以说明为准；说明与本次目标冲突处以用户本次目标为准。\n"
+                                + card.content;
+                        log("📇 说明型技能卡，已把说明全文回给执行者：" + card.name);
+                        return true;
+                    }
                     try {
                         if (ct.startsWith("[")) {
                             csteps = new JSONArray(ct);
@@ -1365,10 +1377,12 @@ public class TaskRunner {
                             csteps = cj.optJSONArray("steps");
                         }
                     } catch (Exception e) {
+                        lastOutput = "技能卡解析异常：" + e.getMessage();
                         log("技能卡解析异常: " + e.getMessage());
                         return false;
                     }
                     if (csteps == null || csteps.length() == 0) {
+                        lastOutput = "技能卡步骤为空（JSON 里没有 steps）";
                         log("技能卡步骤为空");
                         return false;
                     }
@@ -1384,6 +1398,8 @@ public class TaskRunner {
                                     continue;
                                 }
                                 log("技能卡步骤失败于 " + (ci + 1));
+                                lastOutput = "技能卡《" + card.name + "》执行失败于第 "
+                                        + (ci + 1) + " 步：" + cs.toString();
                                 cardOk = false;
                                 break;
                             }
@@ -1398,7 +1414,7 @@ public class TaskRunner {
                             }
                         }
                     }
-                    lastOutput = "";
+                    if (cardOk) lastOutput = "技能卡《" + card.name + "》步骤全部执行完成";
                     return cardOk;
                 }
             }
