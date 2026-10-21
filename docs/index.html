@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>手机智能体 phone-agent — 低 token 消耗的 Android 自动化智能体</title>
-<meta name="description" content="phone-agent：在手机端本地规划、本地执行的 Android 自动化智能体。无障碍 + root 双通道操作，HTTP 远程控制，热补丁，开源免费。">
+<meta name="description" content="phone-agent：用一句自然语言下达目标，手机自己看屏、动手、验收的 Android 自动化智能体。本地意图路由零 token 直达，监管者终审防假完成，App / Telegram / HTTP 远控三通道共用同一智能体，热补丁，开源免费。">
 <style>
 :root{--bg:#0f1115;--card:#171b22;--text:#e8eaed;--muted:#9aa0a6;--accent:#7c5cff;--accent2:#00d4a4;--border:#262c36}
 *{margin:0;padding:0;box-sizing:border-box}
@@ -13,7 +13,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,"PingFang 
 .hero{padding:88px 0 56px;text-align:center}
 .hero h1{font-size:2.4rem;letter-spacing:.02em}
 .hero h1 span{background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
-.hero p{color:var(--muted);margin:18px auto 0;max-width:620px;font-size:1.05rem}
+.hero p{color:var(--muted);margin:18px auto 0;max-width:680px;font-size:1.05rem}
 .badges{margin-top:22px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
 .badge{font-size:.82rem;color:var(--muted);border:1px solid var(--border);border-radius:999px;padding:4px 14px}
 .cta{margin-top:30px;display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
@@ -23,10 +23,16 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,"PingFang 
 .btn:hover{transform:translateY(-2px)}
 section{padding:44px 0;border-top:1px solid var(--border)}
 h2{font-size:1.5rem;margin-bottom:20px}
+h2+p.lead{color:var(--muted);margin:-10px 0 20px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}
 .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:20px}
 .card h3{font-size:1.02rem;margin-bottom:8px}
 .card p{color:var(--muted);font-size:.92rem}
+.card ul{color:var(--muted);font-size:.92rem;padding-left:18px}
+table{width:100%;border-collapse:collapse;font-size:.93rem}
+th,td{border:1px solid var(--border);padding:10px 12px;text-align:left;vertical-align:top}
+th{background:var(--card);white-space:nowrap}
+td{color:var(--muted)}td b{color:var(--text)}
 .steps{counter-reset:s}
 .step{display:flex;gap:14px;margin-bottom:16px;align-items:flex-start}
 .step::before{counter-increment:s;content:counter(s);flex:0 0 30px;height:30px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700}
@@ -41,8 +47,8 @@ a{color:#9d7bff}
 <div class="wrap">
   <div class="hero">
     <h1>📱 手机智能体 <span>phone-agent</span></h1>
-    <p>低 token 消耗的 Android 自动化智能体：任务在手机端本地拆解、本地执行，大模型只做规划与决策，配合本地意图路由、技能卡复用与历史压缩，token 用量远低于全云端方案。开源免费，MIT 协议。</p>
-    <div class="badges"><span class="badge">Android 8.0+</span><span class="badge">无障碍 + root 双通道</span><span class="badge">HTTP 远程控制</span><span class="badge">热补丁</span></div>
+    <p>你用一句自然语言下达目标，手机自己看屏、动手、验收，办完再向你汇报。任务在手机端本地拆解、本地执行，大模型只做规划与决策；再配合本地意图路由、技能卡复用与历史压缩，token 用量远低于全云端方案。开源免费，MIT 协议。</p>
+    <div class="badges"><span class="badge">Android 8.0+</span><span class="badge">root 优先 + 无障碍双通道</span><span class="badge">App / Telegram / HTTP 远控三入口</span><span class="badge">监管者终审</span><span class="badge">热补丁</span></div>
     <div class="cta">
       <a class="btn primary" href="https://github.com/Jinzhiying2004/phone-agent-gsic/releases">⬇ 下载最新版 APK</a>
       <a class="btn ghost" href="https://github.com/Jinzhiying2004/phone-agent-gsic">GitHub 仓库</a>
@@ -50,22 +56,68 @@ a{color:#9d7bff}
   </div>
 
   <section>
-    <h2>✨ 功能亮点</h2>
+    <h2>🎯 它能办哪些具体的事</h2>
+    <table>
+      <tr><th>场景</th><th>你只需要说</th><th>它实际会做</th></tr>
+      <tr><td><b>领权益</b></td><td>「打开汽水音乐领免费听歌时长」</td><td>启动 App → 进活动页 → 视觉定位「视频听全曲」→ 等广告播完 → 领取 → 回桌面；领到有硬停止线，不被「再看一个提前解锁」的链条一直拖下去</td></tr>
+      <tr><td><b>开关系统功能</b></td><td>「开启个人热点」「下滑一下」「回桌面」</td><td>能本地直达的零 token 直接执行；直达不了的进设置里找开关</td></tr>
+      <tr><td><b>日常代操作</b></td><td>「打开微信给 XX 发消息说……」</td><td>自己找入口、找联系人、输入、发送，全程看屏确认，不靠固定坐标死点</td></tr>
+      <tr><td><b>远程代办</b></td><td>在 Telegram 里发一句目标</td><td>手机在家里自己执行，进度实时回传到聊天里，办完发简短总结</td></tr>
+      <tr><td><b>云端操控</b></td><td>云端 Muse 经 Tailscale 下达 goal</td><td>手机端自主拆解执行，云端实时看思考、步数和日志</td></tr>
+      <tr><td><b>定时自动</b></td><td>建每天 / 每周 / 一次性定时任务</td><td>到点自动跑对应目标或技能卡，不用人在场</td></tr>
+    </table>
+    <p style="color:var(--muted);margin-top:14px;font-size:.93rem">办不了或没办成的，它会如实报未完成和卡在哪一步，不会假装办完——有专门的完成硬门槛和监管终审拦着（见下文）。</p>
+  </section>
+
+  <section>
+    <h2>⚙️ 它是怎么工作的</h2>
+    <div class="steps">
+      <div class="step"><p><b>先分流</b>：设闹钟、倒计时、打开应用、回桌面、静音这类高频指令由本地意图路由直接执行，零 token；闲聊走轻量对话；其余进智能体。</p></div>
+      <div class="step"><p><b>看屏决策</b>：智能体截屏 + 读取剪枝后的控件结构，模型结合目标、记忆和技能卡决定下一步调用哪个工具（共 21 个：点击、视觉定位、输入、滑动、启动应用、终端、搜索、读写文件等）。</p></div>
+      <div class="step"><p><b>动手执行</b>：坐标全程 0–1000 归一化，按真实屏尺寸换算像素；有 root 走 <code>input</code> 命令（毫秒级、最稳），失败回退无障碍；纯图标按钮先问视觉模型拿坐标再点。</p></div>
+      <div class="step"><p><b>监管验收</b>：零 token 看门狗盯死循环和幻觉，触发后监管者看截图裁决；自称完成不算数，监管者看最终截图终审，没办到打回补做，办不到如实报未完成。</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>✨ 功能明细</h2>
     <div class="grid">
-      <div class="card"><h3>🧠 任务执行器</h3><p>自然语言目标 → 本地拆解 → 逐步执行 → 监管者复核闭环</p></div>
-      <div class="card"><h3>👁 视觉定位</h3><p>截屏后问视觉模型拿坐标，图标按钮也能点，不靠猜</p></div>
-      <div class="card"><h3>🌐 HTTP 远控</h3><p>目标式任务手机端自主执行，<code>/task</code> 异步 + <code>/task/status</code> 实时看思考与进度，经 Tailscale 从云端直连操控</p></div>
-      <div class="card"><h3>🔥 热补丁</h3><p>dex 补丁通道，小修复不用重装，云端一键推送</p></div>
-      <div class="card"><h3>⏰ 定时任务</h3><p>技能卡按需注入，悬浮窗实时反馈，运行记录可导出</p></div>
-      <div class="card"><h3>📦 内置 Termux</h3><p>免 root 模式可用，targetSdk 28 绕开 Android 10+ 执行限制</p></div>
+      <div class="card"><h3>🧠 智能体执行核心</h3><p>「看屏 → 决策 → 执行 → 再看屏」的原生工具循环，会话即状态，不预生成死计划，走一步看一步、错了换方法。没有人为步数/时长上限（仅 999 轮防死循环熔断），长任务由模型自己决定何时结束。</p></div>
+      <div class="card"><h3>💰 低 token 设计</h3><ul><li>本地意图路由：高频指令零 token 直达</li><li>技能卡复用：办成过的任务下次直接调用</li><li>历史分级压缩，只保留最近轮次和最新截图</li><li>截图降到 720p JPEG，控件传结构化文本</li></ul></div>
+      <div class="card"><h3>🛡 监管者防假完成</h3><p>同动作重复 ≥3 次、双动作交替、连续失败 ≥4 次、反复找不存在的文字、界面停滞都会触发介入；监管者看截图裁决指引/中止/放行。领取类任务另有广告预算熔断和到账硬停止线，不会被推销链条无限拖住。</p></div>
+      <div class="card"><h3>👁 视觉定位</h3><p>截屏问视觉模型拿坐标，纯图标按钮也能点；坐标 0–1000 归一化，不受截图缩放影响。视觉模型不可用时降级用无障碍节点树本地找文字坐标。辅助模型分视觉/语音/图像/对话四类独立配置。</p></div>
+      <div class="card"><h3>🖥 虚拟屏（仅 App 通道）</h3><p>App 内任务自动在虚拟屏里跑，右上角悬浮预览实时可见，不占用主屏；Telegram / 远控任务在主屏执行。任务结束自动清理虚拟屏。需要 root，系统相机在虚拟屏不画图（MIUI 限制）。</p></div>
+      <div class="card"><h3>🃏 技能卡系统</h3><p>步骤 JSON 卡（固定步骤重放）和说明型卡（自然语言流程交给智能体执行）两种形态；用户手写优先于自动沉淀；支持可选步骤（失败跳过不中断）、导出/导入校验。</p></div>
+      <div class="card"><h3>🧠 共享记忆与经验</h3><p>三通道共用一份对话上下文（30 轮，重启不忘）和经验库（200 条）：每次任务结局自动沉淀，新任务前按相似度注入最相关的先例，先核实前提、不重复无效探索。</p></div>
+      <div class="card"><h3>🔥 热补丁</h3><p>dex 补丁通道，小修复不用重装；推送校验签名 + sha256，支持备份回滚。改不了 manifest / 图标 / 布局资源，那些仍走整包。</p></div>
+      <div class="card"><h3>📦 内置 Termux 与保活</h3><p>一键下载官方 bootstrap 并校验，免 root staging 模式可直接跑 shell。常驻三层保活：开机自启 + 10 分钟闹钟看门狗 + root 设备 Magisk 守护（60 秒查活）；手动停止会被尊重。</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>📡 三个入口，同一个智能体</h2>
+    <p class="lead">三个入口共用同一套执行核心、技能卡、记忆和经验——谁学到的，另外两个立刻能用。</p>
+    <table>
+      <tr><th>入口</th><th>怎么用</th><th>细节</th></tr>
+      <tr><td><b>App 内对话</b></td><td>在「智能体」页输入目标</td><td>真流式输出；运行中全屏流光边框提示（触摸穿透不挡操作）；任务中可插话反馈，下一步即参考</td></tr>
+      <tr><td><b>Telegram 机器人</b></td><td>给自己的 Bot 发消息</td><td><code>/status</code> 状态、<code>/shot</code> 截屏、<code>/stop</code> 打断、<code>/new</code> 新对话、<code>/task {json}</code> 跑步骤、<code>/agent 目标</code> 智能执行；直接发文字＝下达目标；进度在一条消息里原地直播，只认绑定主人的消息</td></tr>
+      <tr><td><b>HTTP 远控</b></td><td>云端经 Tailscale 调用</td><td><code>/status</code>、<code>/screen</code>（读屏零截图）、<code>/screenshot</code>、<code>/action</code> 单步、<code>/task</code> 目标式异步执行、<code>/task/status</code> 实时进度、<code>/patch</code> 推补丁；另有硬件/软件/系统三类直接动作</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>🔒 安全与限制（先说清楚）</h2>
+    <div class="grid">
+      <div class="card"><h3>安全</h3><ul><li>动作风险四级，每级可设自动允许 / 每次确认 / 拒绝；远控与 TG 无审批人在场时，「每次确认」档直接拦截</li><li>远控只放行回环和 Tailscale 网段，同 WiFi 其他设备连不上；每请求 token 鉴权</li><li>API key、各类 token、用户记忆走 Android Keystore 加密，不明文落盘、不进安装包</li></ul></div>
+      <div class="card"><h3>限制</h3><ul><li>智能执行需要自备大模型 API key；零 token 的只有本地路由直达的几类指令</li><li>无 root 只能走无障碍，MIUI 上手势偶尔被系统取消，稳定性不如 root；虚拟屏需要 root</li><li>界面改版、强弹窗广告、验证码等场景可能办不成——它会如实报未完成</li></ul></div>
     </div>
   </section>
 
   <section>
     <h2>🚀 三步用起来</h2>
     <div class="step"><p><b>下载安装</b>：从 <a href="https://github.com/Jinzhiying2004/phone-agent-gsic/releases">Releases</a> 下载最新 <code>phone-agent-x.xx.apk</code> 安装</p></div>
-    <div class="step"><p><b>打开无障碍服务</b>：系统设置 → 无障碍 → 开启「手机智能体」（root 设备可获得更稳的点击通道）</p></div>
-    <div class="step"><p><b>下达任务</b>：在 App 里用自然语言描述目标，看它一步步执行；远控玩家可配 Tailscale 走 HTTP API</p></div>
+    <div class="step"><p><b>配置模型与权限</b>：在 App 里填主模型 API key（可从服务商拉取模型列表直接选）；开启无障碍服务，root 设备自动获得更稳的执行通道</p></div>
+    <div class="step"><p><b>下达任务</b>：在 App「智能体」页用自然语言描述目标即可；想远程用就配 Telegram 机器人，或按仓库 README 的三步把自己的 Muse 经 Tailscale 连上</p></div>
   </section>
 
   <section>
@@ -81,7 +133,7 @@ a{color:#9d7bff}
     <h2>🔧 自己构建</h2>
     <p style="color:var(--muted)">手工编译链（aapt2 + javac + d8 + apksigner），无需 Gradle。依赖 JDK 17 与 Android SDK（build-tools 34.0.0 / android-34）：</p>
     <p style="margin-top:12px"><code>./build.sh</code></p>
-    <p style="color:var(--muted);margin-top:12px;font-size:.9rem">版本号规则：每次迭代 +0.01（单次超 5 功能则 +0.1），versionCode +1，产物命名 <code>phone-agent-&lt;版本&gt;.apk</code>。</p>
+    <p style="color:var(--muted);margin-top:12px;font-size:.9rem">版本号规则：每次迭代 +0.01（单次超 5 功能则 +0.1），versionCode +1，产物命名 <code>phone-agent-&lt;版本&gt;.apk</code>。更完整的说明见仓库 README 与 ARCHITECTURE.md。</p>
   </section>
 
   <footer>phone-agent · MIT License · <a href="https://github.com/Jinzhiying2004/phone-agent-gsic">GitHub</a></footer>

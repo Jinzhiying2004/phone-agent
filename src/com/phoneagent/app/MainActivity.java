@@ -4211,6 +4211,42 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    // v3.47: usage guide text, shared by About-Software and My-page bottom card (single source, no divergence)
+    private static String usageGuideText() {
+        return "【先做准备】\n"
+                + "1. 权限：开无障碍（读屏/点击/截图，只在本机用）、悬浮窗（任务进度与流光显示）；MIUI 还要放行后台弹出界面并加电池白名单，否则可能点不动或后台被杀。有 root 时自动走 root 操作通道，更快更稳；无 root 也能用（无障碍通道）。\n"
+                + "2. 模型：主页「云端大模型」填主模型（地址/Key/模型名，点「拉取」可从服务商获取模型列表直接选）。没配主模型 Key 时智能执行用不了，但本地直达指令照常。纯图标按钮靠视觉定位，建议在「辅助模型」里配一个视觉类模型（如智谱 glm-4v-flash），主模型会兜底。\n\n"
+                + "【智能体页：下达任务】\n"
+                + "底部中间「智能体」页输入一句目标即可，例如：打开汽水音乐领免费听歌时长 / 开启个人热点 / 打开微信给某人发消息。它会自己看屏、规划、动手、复核，走一步看一步，错了换方法；没有步数和总时长限制，觉得办完才停。\n"
+                + "运行中：全屏流光边框表示正在干活（触摸穿透，不挡你操作）；你可以中途在对话里插话纠正，它下一步就参考；发送按钮变停止可随时打断。虚拟屏在右上角有悬浮预览（仅 App 通道，见下）。\n"
+                + "快捷指令：/stop 强停、/clear 清空、/retry 重试、/help 帮助、/new 新开对话（清三端共享上下文）。\n\n"
+                + "【零 token 直达与闲聊】\n"
+                + "这几类不进模型、本地直接办：设闹钟、倒计时、打开/开启某个应用、打开相册、回桌面/回主页、静音/震动/响铃。打招呼、提问类闲聊走轻量对话回复，不烧任务 token；短指令默认按任务处理，不会被误判成闲聊。\n\n"
+                + "【监管者：防假完成】\n"
+                + "本地看门狗盯着重复动作、来回交替、连续失败、反复找不存在的文字、界面停滞；触发后监管者看最新截图裁决（给指引继续/办不成中止/误报放行）。任务结束还要过终审：监管者看最终截图核对目标，没办到会打回补做，办不到如实报未完成——自己说完成不算数。开关与监管模型在「我的」页：监管者默认用最强主模型，长按某个模型档案可指定它专做监管。\n\n"
+                + "【技能卡】\n"
+                + "两种卡：步骤卡（JSON 固定步骤重放）和说明型卡（自然语言流程，交给智能体照着做）。来源：你手写的优先，其次是任务成功后自动沉淀的。技能中心可运行/删除/导出/导入；步骤可标 optional，失败只跳过不中断整卡；智能体也会按关键词自己调用合适的卡。常用任务存成卡，下次一句话直接办，省 token。\n\n"
+                + "【定时任务】\n"
+                + "四种类型：每天、每周几、每隔 N 分钟、一次性。到点自动执行目标或技能卡，执行结果进运行记录。\n\n"
+                + "【远控页：服务与云端操控】\n"
+                + "1. 远程控制服务：启停服务、改端口（默认 28789）、看/复制 token。服务只放行本机回环和 Tailscale 网段，同 WiFi 的其他设备连不上；token 别给别人，拿到就能操作你的手机。\n"
+                + "2. 云端操控：手机装 Tailscale 并与云端 Muse 同一账号组网，在本页复制连接信息（IP/端口/token）发给 Muse，它就能用 /status 看状态、/screen 读屏、/screenshot 截屏、/action 单步、/task 下达步骤或目标、/task/status 看实时进度。远控任务在主屏执行，结束后自动回桌面。\n"
+                + "3. API 接口卡有每个接口的说明与示例。\n\n"
+                + "【Telegram 机器人】\n"
+                + "远控页的 TG 卡填 Bot token 后启用，软件启动会自动拉起。先给 Bot 发 /start 绑定主人，只认主人的消息。直接发文字就是下达目标；指令：/status 状态、/shot 截屏、/stop 打断、/new 新对话、/task {json} 跑步骤、/agent 目标 智能执行。执行进度会在一条消息里原地更新，结束发简短总结。\n\n"
+                + "【虚拟屏】\n"
+                + "只有 App 通道发的任务默认在虚拟屏里跑（需要 root）：不占用主屏，右上角悬浮预览能实时看到它在做什么，结束自动销毁。Telegram 和远控的任务在主屏执行。注意：系统相机在虚拟屏里不画图（MIUI 限制），涉及相机预览的任务请在主屏做。\n\n"
+                + "【终端页】\n"
+                + "内置 Termux：首次一键下载官方环境（约 30MB，校验后使用），免 root 用 staging 模式也能跑 bash 和 pkg；终端页可直接交互，智能体也能用 termux 工具在本地查信息、算数、处理文件。环境异常先点「诊断」，链接坏了点「修复链接」。无 root 设备不显示终端页。\n\n"
+                + "【我的页】\n"
+                + "关于更新：看版本、检查更新、设更新源；关于软件：本使用方法 + 全部更新日志。还有：监管者输出（独立折叠区）、动作审批（见下）、长期记忆管理（查看/删单条/清空）、智能沉淀（1/7/30 天报告，可分享给 Muse 分析）、任务日志与运行记录（可导出）、软件自检。\n\n"
+                + "【安全与动作审批】\n"
+                + "动作按风险分四级：只读/设备控制/外部效应/破坏性，每级可设自动允许、每次确认或拒绝。远控和 Telegram 进来的任务没有审批人在场，「每次确认」档会被直接拦截。API Key、TG token、远控 token 和用户记忆都经系统 Keystore 加密保存，不明文存。\n\n"
+                + "【限制与排障】\n"
+                + "办不成会如实报未完成和卡点，常见原因：没配模型 Key、视觉模型不可用、目标 App 改版、强弹窗广告或验证码、应用根本没装。任务长时间没进展可 /stop 打断后换个说法重试，或看「我的」页的任务日志定位卡在哪一步。\n\n"
+                + "【返回键】非主页按返回先回主页，主页双击退出。";
+    }
+
     // v2.65：关于软件卡（含使用方法+更新日志，二级折叠）
     private LinearLayout buildAboutSoftwareCard() {
         LinearLayout swCard = card();
@@ -4270,15 +4306,7 @@ public class MainActivity extends Activity {
         useHeader.addView(useArrow);
         swBody.addView(useHeader);
         TextView useBody = new TextView(this);
-        useBody.setText("【智能体】在思考执行员页输入目标，AI 自动规划并执行，"
-                + "监管者会在任务结束后独立复核完成度。\n\n"
-                + "【技能卡】常用任务可存为技能卡，一键运行，"
-                + "支持可选步骤（失败自动跳过）。\n\n"
-                + "【远控】手机开 Tailscale + 远控服务，云端 Muse "
-                + "可远程操控（端口 28789，token 鉴权）。\n\n"
-                + "【虚拟屏】需要 root，任务在虚拟屏后台跑，"
-                + "不打扰手机正常使用（vd_create 等 7 个动作）。\n\n"
-                + "【返回键】非主页按返回先回主页，主页双击退出。");
+        useBody.setText(usageGuideText());
         useBody.setTextSize(13);
         useBody.setTextColor(TEXT_DARK);
         useBody.setLineSpacing(dp(4), 1f);
@@ -4838,31 +4866,8 @@ public class MainActivity extends Activity {
         use.setTextSize(14);
         use.setTextColor(TEXT_DARK);
         use.setLineSpacing(dp(4), 1f);
-        use.setText("1. 开启权限\n"
-                + "主页 →「开启无障碍权限」，在系统设置中找到「手机Agent」并打开。\n"
-                + "MIUI 还需允许「后台弹出界面」，否则可能点不动。\n\n"
-                + "2. 写技能\n"
-                + "先打开目标 App，再回主页点「抓取当前界面文本」，\n"
-                + "按文本名写 tap_text 步骤；或开开发者选项「指针位置」取坐标写 tap 步骤。\n"
-                + "技能为 JSON，支持：launch / tap / tap_text / tap_id / wait_text /\n"
-                + "assert_text / input / swipe / sleep / back / shell / screenshot / skill。\n"
-                + "步骤里写 {{变量名}}，运行时由任务 params 传入；skill 步骤可调用子技能。\n\n"
-                + "3. 跑技能\n"
-                + "技能卡片点「运行」；也可设为定时任务自动执行。\n\n"
-                + "3b. AI 智能执行\n"
-                + "主页「AI 智能执行」输入目标（如\"打开时钟设 7 点闹钟\"），\n"
-                + "大脑看屏思考、手自动操作，最多 12 步，可随时停止。\n\n"
-                + "4. 远程控制（被云端 Agent 操控）\n"
-                + "远控页启动服务并记下 token；手机加入 Tailscale 网络后，\n"
-                + "云端 Agent 即可通过 http://<手机IP>:<端口> 发指令：\n"
-                + "读屏、点击、输入、执行完整任务。\n\n"
-                + "5. Termux 终端\n"
-                + "终端页是内置 Termux 环境的终端输入区，环境就绪后才显示；\n"
-                + "「Termux 生态」按钮可查看/安装 Termux:API 等官方插件。\n\n"
-                + "6. 内置 Termux 环境\n"
-                + "终端页顶部一键下载官方 Termux 环境（约 30MB，仅首次下载时联网），\n"
-                + "之后点「Termux」直接进入其 bash，pkg install python 等均可使用。\n"
-                + "需要 root 挂载到标准路径；若装有官方 Termux App 则自动避让不覆盖。");
+        use.setText(usageGuideText());
+        
         useCard.addView(use);
         inner.addView(useCard);
 
