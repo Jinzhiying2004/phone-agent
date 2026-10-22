@@ -104,6 +104,33 @@ public class MainActivity extends Activity {
             new java.util.concurrent.ConcurrentLinkedQueue<>();
     private boolean loadingHistory = false;
     private Runnable agentFloatHintRefresher;
+    // v3.52 地基·流光写死：软件内嵌彩条——不走悬浮窗，直接长在界面根布局上，
+    // 500ms 对表任务状态（FloatWindow.isTaskActive，三端共用同一状态源）：
+    // 任何通道的任务在跑，打开软件必见彩条，与悬浮窗互为双保险
+    private android.view.View inAppFlowStripe;
+    private FlowLightDrawable inAppFlowDrawable;
+    private final android.os.Handler inAppFlowHandler =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable inAppFlowTick = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                // v3.53：改认 isActive（任务登记 OR 远控操控心跳），与悬浮流光同判据
+                boolean on = FloatWindow.isActive();
+                if (inAppFlowStripe != null) {
+                    if (on && inAppFlowStripe.getVisibility() != android.view.View.VISIBLE) {
+                        inAppFlowStripe.setVisibility(android.view.View.VISIBLE);
+                        if (inAppFlowDrawable != null) inAppFlowDrawable.start();
+                    } else if (!on && inAppFlowStripe.getVisibility() == android.view.View.VISIBLE) {
+                        inAppFlowStripe.setVisibility(android.view.View.GONE);
+                        if (inAppFlowDrawable != null) inAppFlowDrawable.stop();
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+            inAppFlowHandler.postDelayed(this, 500);
+        }
+    };
     private android.app.AlertDialog chatHistoryDialog;
     private LinearLayout userProfileBox;
     private UserProfile userProfile;
@@ -631,7 +658,7 @@ public class MainActivity extends Activity {
             case "/stop":
                 agentStop = true;
                 agentLog("🛑 已强行停止");
-                FloatWindow.hide();
+                FloatWindow.forceEnd();
                 stopInputFlow();
                 return true;
             case "/clear":
@@ -1051,6 +1078,10 @@ public class MainActivity extends Activity {
             boolean stopped = false;
             String supFeedback = "";
             try {
+                // v3.51：App 通道任务登记（此前 App 任务不登记，流光无自愈、
+                // 丢了全程黑）——与线程 finally 的 endTask 配对，监管多轮
+                // 期间 AgentLoop 的登记嵌套在内，计数不归零不熄灯
+                FloatWindow.beginTask(this, "🎯 " + taskGoal);
                 // 悬浮窗权限：没有就先提示一次
                 if (!FloatWindow.hasPermission(this)) {
                     runOnUiThread(() -> android.widget.Toast.makeText(this,
@@ -1120,9 +1151,9 @@ public class MainActivity extends Activity {
                             agentLog("↻ 后台重试第 " + attempt + " 次…");
                         }
                         final boolean isContinue = supRound > 0;
-                        runOnUiThread(() -> FloatWindow.show(MainActivity.this,
-                                isContinue ? "🤖 监管者要求继续执行…"
-                                        : "🤖 准备执行…"));
+                        // v3.51：不再每轮 hide+重加（闪烁且一次失败就丢窗），
+                        // 改断言补窗——窗在就不动，缺了才补
+                        runOnUiThread(FloatWindow::assertShown);
                         runOnUiThread(this::startInputFlow);
                         behaviorLog.user("启动智能体任务", taskGoal);
                         behaviorLog.app("智能体开始执行",
@@ -1204,7 +1235,28 @@ public class MainActivity extends Activity {
                         if (!supFeedback.isEmpty()) loop.setSupervisorFeedback(supFeedback);
                         loop.setFeedbackSupplier(() -> feedbackQueue.poll());
                         loopRef[0] = loop;
-                        finalDone = loop.run(taskGoal, stepBudget);
+                        // v3.50 第 3 步：低置信拦截——loop.run() 被拦截时弹选项对话框，
+                        // 用户点选后把选项拼回 goal 重跑（最多澄清 2 轮；取消则停任务）
+                        String execGoal = taskGoal;
+                        int clarifyRounds = 0;
+                        finalDone = false;
+                        while (!agentStop) {
+                            final String g = execGoal;
+                            finalDone = loop.run(g, stepBudget);
+                            if (!loop.needsClarify()) break;
+                            if (clarifyRounds >= 2) {
+                                agentLog("❓ 已澄清 2 轮仍低置信，停止（请换个说法再试）");
+                                break;
+                            }
+                            clarifyRounds++;
+                            String clarified = askClarifyGoal(g, loop);
+                            if (clarified == null) {
+                                agentLog("❓ 用户取消澄清，任务停止");
+                                break;
+                            }
+                            execGoal = clarified;
+                            agentLog("❓ 澄清后重跑：" + execGoal);
+                        }
                         if (finalDone || agentStop) break;
                         if (attempt < maxRetry) {
                             try {
@@ -1259,8 +1311,10 @@ public class MainActivity extends Activity {
                                 AgentAccessibilityService.dumpScreen();
                         String fScreen = fNodes.isEmpty()
                                 ? "(读屏为空)" : AgentLoop.serialize(fNodes);
+                        // v3.50 意图层：终审判据绑定——把任务书传给监管者，只按任务书完成判据裁决
                         verdict = Supervisor.review(llmStore.supervisorClient(), taskGoal,
-                                finalDone, lastHistory, fScreen);
+                                finalDone, lastHistory, fScreen, null,
+                                loopRef[0] != null ? loopRef[0].getTaskBook() : null);
                     } catch (Exception e) {
                         supervisorLog("🔍 监管者复核异常：" + e.getMessage());
                     }
@@ -1358,7 +1412,7 @@ public class MainActivity extends Activity {
             } finally {
                 TaskLock.release("app"); // v3.32：三通道互斥释放
                 runOnUiThread(() -> {
-                    FloatWindow.hide();
+                    FloatWindow.endTask("");
                     stopInputFlow();
                     if (agentSendBtn != null) agentSendBtn.setText("发送");
                 });
@@ -2598,13 +2652,34 @@ public class MainActivity extends Activity {
             skillCardsBox.addView(grayText("暂无技能卡，完成任务后会自动生成"));
             return;
         }
+        // 两类卡分区展示（用户 2026-10-22 亲定分开存储）：步骤型
+        // （确定性回放）在前，说明型（智能体读说明执行）在后
+        boolean hasSteps = false, hasGuide = false;
         for (SkillCardStore.Card c : list) {
+            if (c.isProse()) hasGuide = true; else hasSteps = true;
+        }
+        if (hasSteps) {
+            skillCardsBox.addView(grayText("— 步骤型 · 确定性回放 —"));
+            for (SkillCardStore.Card c : list) {
+                if (!c.isProse()) addSkillCardRow(c);
+            }
+        }
+        if (hasGuide) {
+            skillCardsBox.addView(grayText("— 说明型 · 智能体读说明执行 —"));
+            for (SkillCardStore.Card c : list) {
+                if (c.isProse()) addSkillCardRow(c);
+            }
+        }
+    }
+
+    private void addSkillCardRow(SkillCardStore.Card c) {
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.VERTICAL);
             row.setPadding(0, dp(6), 0, dp(6));
             TextView t = new TextView(this);
             t.setText("📇 " + c.name + "（" + c.typeLabel() + "·"
-                    + c.sourceLabel() + "·用过" + c.useCount + "次）");
+                    + c.sourceLabel() + "·用过" + c.useCount + "次）"
+                    + (c.isProse() ? "·说明型，点运行由智能体执行" : ""));
             t.setTextSize(14);
             t.setTextColor(DyColor.onSurface(this));
             row.addView(t);
@@ -2651,13 +2726,27 @@ public class MainActivity extends Activity {
             btnRow.addView(bDel);
             row.addView(btnRow);
             skillCardsBox.addView(row);
-        }
     }
 
     /** 手动运行技能卡 */
     private void runSkillCard(String cardId) {
         SkillCardStore.Card c = new SkillCardStore(this).get(cardId);
         if (c == null) return;
+        // 说明型卡：TaskRunner 的 use_card 只把说明回给调用者、零动作，
+        // 手动运行走它就是「没执行却报 ✓」的假成功（2026-10-22 用户亲测）。
+        // 改转智能体任务：模型读卡说明后用自己的工具逐步执行（与 TG
+        // 通道同一条路），技能中心切到智能体页让用户看得见过程。
+        if (c.isProse()) {
+            log("📇 说明型技能卡，转交智能体执行：" + c.name);
+            final String g = "执行技能卡《" + c.name + "》（id=" + c.id
+                    + "）：先用 use_card 读取本卡说明，再按说明用你的工具逐步完成";
+            runOnUiThread(() -> {
+                showPage(2);
+                agentGoal.setText(g);
+                startAgent();
+            });
+            return;
+        }
         log("📇 手动运行技能卡：" + c.name);
         new Thread(() -> {
             TaskRunner runner = new TaskRunner(this, this::log);
@@ -4117,6 +4206,16 @@ public class MainActivity extends Activity {
         scStatus.setTextSize(13);
         scStatus.setTextColor(TEXT_GRAY);
         scCard.addView(scStatus);
+        // v3.52：开机自启回执（地基自验：有证据的自启状态）
+        final TextView scBoot = new TextView(this);
+        scBoot.setTextSize(13);
+        scBoot.setTextColor(TEXT_GRAY);
+        scCard.addView(scBoot);
+        // 地基·自更新回执（与自启回执并列展示）
+        final TextView scUpd = new TextView(this);
+        scUpd.setTextSize(13);
+        scUpd.setTextColor(TEXT_GRAY);
+        scCard.addView(scUpd);
         final Button bToggle = smallBtn("▶ 开始记录");
         final Runnable refreshSc = new Runnable() {
             @Override
@@ -4125,6 +4224,8 @@ public class MainActivity extends Activity {
                 bToggle.setText(rec ? "⏹ 停止记录" : "▶ 开始记录");
                 scStatus.setText(rec ? "● 正在记录…" : "未记录");
                 scStatus.setTextColor(rec ? Color.RED : TEXT_GRAY);
+                scBoot.setText(BootReceiver.receiptText(MainActivity.this));
+                scUpd.setText(UpdateManager.receiptText(MainActivity.this));
             }
         };
         bToggle.setOnClickListener(v -> {
@@ -4959,7 +5060,10 @@ public class MainActivity extends Activity {
                     }
                     updStatus.setText("下载完成，准备安装…");
                     String r = UpdateManager.installApk(MainActivity.this, apk);
-                    if ("need_permission".equals(r)) {
+                    if ("silent_ok".equals(r)) {
+                        updStatus.setText("已静默安装，服务重启后即是新版"
+                                + "（自检卡可查更新回执）");
+                    } else if ("need_permission".equals(r)) {
                         new AlertDialog.Builder(MainActivity.this)
                                 .setTitle("需要安装权限")
                                 .setMessage("请在系统设置中允许本应用“安装未知应用”，"
@@ -5387,6 +5491,20 @@ public class MainActivity extends Activity {
         root.addView(tabBar, tabLp);
 
         setContentView(root);
+        // v3.52：内嵌彩条挂到根布局最上层（不消费触摸，纯显示）
+        try {
+            inAppFlowDrawable = new FlowLightDrawable(
+                    android.graphics.Color.TRANSPARENT, 0xFF40C4FF, 0,
+                    getResources().getDisplayMetrics().density);
+            inAppFlowStripe = new android.view.View(this);
+            inAppFlowStripe.setBackground(inAppFlowDrawable);
+            inAppFlowStripe.setVisibility(android.view.View.GONE);
+            root.addView(inAppFlowStripe,
+                    new android.widget.FrameLayout.LayoutParams(
+                            android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                            android.widget.FrameLayout.LayoutParams.MATCH_PARENT));
+        } catch (Exception ignored) {
+        }
         int lastTab = getSharedPreferences("ui", MODE_PRIVATE).getInt("tab", 0);
         if (lastTab < 0 || lastTab > 4) lastTab = 0;
         showPage(lastTab);
@@ -5623,12 +5741,13 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        inAppFlowHandler.removeCallbacks(inAppFlowTick);
         FloatWindow.setInApp(false);
         // 离开软件且任务在跑：补弹悬浮窗显示进度
         try {
             if (agentThread != null && agentThread.isAlive()
                     && !agentStop) {
-                FloatWindow.show(this, "🤖 任务执行中…");
+                FloatWindow.assertShown();
             }
         } catch (Exception ignored) {
         }
@@ -5636,6 +5755,9 @@ public class MainActivity extends Activity {
 
     protected void onResume() {
         super.onResume();
+        // v3.52：内嵌彩条对表开始（首跳立即执行，回软件即见当前任务状态）
+        inAppFlowHandler.removeCallbacks(inAppFlowTick);
+        inAppFlowHandler.post(inAppFlowTick);
         new Thread(() -> SedimentReport.checkSchedule(this)).start();
         try {
             if (getIntent() != null && getIntent().getBooleanExtra("open_sediment", false)) {
@@ -5684,6 +5806,63 @@ public class MainActivity extends Activity {
      * 超时/卡住时主动询问用户是否继续，并阐明原因。
      * 在后台线程调用，会阻塞等待用户选择。返回 true=继续。
      */
+    /**
+     * v3.50 第 3 步：低置信澄清对话框（agent 线程调用，UI 线程弹窗阻塞等待）。
+     * 有选项时点选；无选项时让用户自由补充。返回拼好"（用户明确：…）"的重跑目标，
+     * 用户取消返回 null（并置 agentStop）。
+     */
+    private String askClarifyGoal(String goal, AgentLoop loop) {
+        if (agentStop) return null;
+        final String question = loop.clarifyQuestion();
+        final java.util.List<String> opts = loop.clarifyOptions();
+        final String[] result = {null};
+        final java.util.concurrent.CountDownLatch latch =
+                new java.util.concurrent.CountDownLatch(1);
+        runOnUiThread(() -> {
+            android.app.AlertDialog.Builder b =
+                    new android.app.AlertDialog.Builder(this)
+                            .setTitle("❓ 需要确认一下")
+                            .setMessage(question)
+                            .setCancelable(false)
+                            .setNegativeButton("取消任务", (d, w) -> {
+                                result[0] = null;
+                                agentStop = true;
+                                latch.countDown();
+                            });
+            if (opts != null && !opts.isEmpty()) {
+                final String[] items = opts.toArray(new String[0]);
+                b.setItems(items, (d, which) -> {
+                    result[0] = goal + "（用户明确：" + items[which] + "）";
+                    latch.countDown();
+                });
+            } else {
+                final android.widget.EditText et =
+                        new android.widget.EditText(this);
+                et.setHint("请补充说明…");
+                et.setMinLines(2);
+                b.setView(et);
+                b.setPositiveButton("确定", (d, w) -> {
+                    String t = et.getText().toString().trim();
+                    if (t.isEmpty()) {
+                        result[0] = null;
+                        agentStop = true;
+                    } else {
+                        result[0] = goal + "（用户明确：" + t + "）";
+                    }
+                    latch.countDown();
+                });
+            }
+            b.show();
+        });
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
+        return result[0];
+    }
+
     private boolean askUserContinue(String reason) {
         // v3.14：优先全局悬浮窗（虚拟屏任务时主屏也能决策）
         boolean useOverlay = getSharedPreferences("agent", MODE_PRIVATE)

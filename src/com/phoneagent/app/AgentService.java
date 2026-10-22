@@ -108,6 +108,14 @@ public class AgentService extends Service {
     public void onCreate() {
         super.onCreate();
         instance = this;
+        // v3.52：开机自启回执确认（有待确认的开机广播则落 boot_ok_ts）
+        BootReceiver.noteServiceUp(this);
+        // 地基·自更新：装后自验对账 + 启动静默检查（24h 节流、只记不扰）
+        UpdateManager.confirmIfUpdated(this);
+        UpdateManager.silentCheck(this);
+        // v3.54 热更新诊断 E1：运行中 dump ClassLoader 元素构成+补丁类 CodeSource
+        // （异步，不阻塞启动；与 attach 时刻 dump 对比即 E3）
+        PatchDiag.dumpAsync(this, "service");
         String chId = "agent_svc";
         if (Build.VERSION.SDK_INT >= 26) {
             NotificationChannel ch = new NotificationChannel(

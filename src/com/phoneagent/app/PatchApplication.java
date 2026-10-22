@@ -13,5 +13,7 @@ public class PatchApplication extends Application {
     protected void attachBaseContext(Context base) {
         super.attachBaseContext(base);
         PatchManager.tryLoadPatch(this);
+        // v3.54 热更新诊断 E1：注入时刻 dump ClassLoader 元素构成（同步、轻量）
+        PatchDiag.dump(this, "attach");
     }
 }

@@ -25,6 +25,8 @@ public class Supervisor {
         public String missing = "";
         /** 建议的具体下一步（无则空） */
         public String nextAction = "";
+        /** v3.50 意图层：任务书完成判据是否达成（无任务书时与 completed 一致） */
+        public boolean criterionMet = true;
         public boolean ok = false;
     }
 
@@ -37,46 +39,74 @@ public class Supervisor {
     public static Verdict review(LlmClient client, String goal, boolean workerSaid,
                                  String history, String finalScreen,
                                  android.graphics.Bitmap finalShot) {
+        return review(client, goal, workerSaid, history, finalScreen, finalShot, null);
+    }
+
+    /**
+     * v3.50 意图层：终审判据绑定。
+     * 传入有效任务书时，prompt 追加"只按任务书完成判据裁决"铁律，输出加 criterion_met，
+     * completed 与 criterion_met 强制一致（防模型嘴上说判据没达成、结论却写完成）。
+     * book 为 null/无效时走老路，行为不变。
+     */
+    public static Verdict review(LlmClient client, String goal, boolean workerSaid,
+                                 String history, String finalScreen,
+                                 android.graphics.Bitmap finalShot, TaskBook book) {
         Verdict v = new Verdict();
         try {
-            String prompt = "你是手机自动化任务的监管者，负责独立复核任务完成情况。"
-                    + (finalShot != null ? "已附任务结束时的手机截图，结合截图判断。" : "") + "\n\n"
-                    + "用户目标：" + goal + "\n"
-                    + "执行 agent 自认：" + (workerSaid ? "已完成" : "未完成") + "\n"
-                    + "执行过程：\n" + history + "\n"
-                    + "任务结束时的手机界面：\n" + finalScreen + "\n\n"
-                    + "判定原则（重要）：\n"
-                    + "1. 保守判定：只有在有明确证据表明目标未达成时，才判 completed=false；"
-                    + "证据不足或目标已基本达成时，判 completed=true\n"
-                    + "2. 不要吹毛求疵：细节不完美但目标已达成，算完成，在 review 里说明即可\n"
-                    + "3. 不要武断：否决必须给出具体的 missing 和 next_action，"
-                    + "说不清缺什么就不要否决\n"
-                    + "4. 按目标对象状态核对，不按工作量核对：做了很多步、有进展都不算完成证据，"
-                    + "只认目标对象当前状态的证据\n"
-                    + "5. 领取/奖励类目标：历史或界面出现『领取成功/已领取/奖励已到账』，"
-                    + "即该对象已达成，判 completed=true；执行者此后继续看的"
-                    + "『再看N个提前得明日/第X+1日』是 App 的链条推销、属于目标外，"
-                    + "不因为它还在继续操作就判未完成\n"
-                    + "6. 无操作证据不判完成：执行过程若没有任何实际操作目标 App 的动作"
-                    + "（只有 observe/查技能卡/读说明），执行者却声称已在应用内完成操作"
-                    + "（看广告、点领取等），属于无证据叙述，判 completed=false，"
-                    + "missing 写明它声称做了但过程里没有的操作\n\n"
-                    + "只输出纯 JSON：\n"
-                    + "{\"completed\":true,"
-                    + "\"progress_pct\":85,"
-                    + "\"progress\":\"一句话进度描述\","
-                    + "\"review\":\"一句话结果点评\","
-                    + "\"missing\":\"具体缺什么（无则空字符串）\","
-                    + "\"next_action\":\"建议的具体下一步（无则空字符串）\"}";
+            boolean bindCriterion = book != null && book.valid()
+                    && book.criteria != null && !book.criteria.trim().isEmpty();
+            StringBuilder pb = new StringBuilder();
+            pb.append("你是手机自动化任务的监管者，负责独立复核任务完成情况。")
+                    .append(finalShot != null ? "已附任务结束时的手机截图，结合截图判断。" : "")
+                    .append("\n\n")
+                    .append("用户目标：").append(goal).append("\n")
+                    .append("执行 agent 自认：").append(workerSaid ? "已完成" : "未完成").append("\n")
+                    .append("执行过程：\n").append(history).append("\n")
+                    .append("任务结束时的手机界面：\n").append(finalScreen).append("\n\n");
+            if (bindCriterion) {
+                pb.append("本次任务书：对象=").append(book.target)
+                        .append("；动作=").append(book.action)
+                        .append("；完成判据=").append(book.criteria)
+                        .append("（只认这一条）。\n")
+                        .append("裁决铁律：只按上面这条完成判据裁决，不按\"做了多少步/有没有进展\"裁决；")
+                        .append("判据无可观测证据 → completed=false。\n\n");
+            }
+            pb.append("判定原则（重要）：\n")
+                    .append("1. 保守判定：只有在有明确证据表明目标未达成时，才判 completed=false；")
+                    .append("证据不足或目标已基本达成时，判 completed=true\n")
+                    .append("2. 不要吹毛求疵：细节不完美但目标已达成，算完成，在 review 里说明即可\n")
+                    .append("3. 不要武断：否决必须给出具体的 missing 和 next_action，")
+                    .append("说不清缺什么就不要否决\n")
+                    .append("4. 按目标对象状态核对，不按工作量核对：做了很多步、有进展都不算完成证据，")
+                    .append("只认目标对象当前状态的证据\n")
+                    .append("5. 领取/奖励类目标：历史或界面出现『领取成功/已领取/奖励已到账』，")
+                    .append("即该对象已达成，判 completed=true；执行者此后继续看的")
+                    .append("『再看N个提前得明日/第X+1日』是 App 的链条推销、属于目标外，")
+                    .append("不因为它还在继续操作就判未完成\n")
+                    .append("6. 无操作证据不判完成：执行过程若没有任何实际操作目标 App 的动作")
+                    .append("（只有 observe/查技能卡/读说明），执行者却声称已在应用内完成操作")
+                    .append("（看广告、点领取等），属于无证据叙述，判 completed=false，")
+                    .append("missing 写明它声称做了但过程里没有的操作\n\n")
+                    .append("只输出纯 JSON：\n")
+                    .append("{\"completed\":true,")
+                    .append("\"progress_pct\":85,")
+                    .append("\"progress\":\"一句话进度描述\",")
+                    .append("\"review\":\"一句话结果点评\",")
+                    .append("\"missing\":\"具体缺什么（无则空字符串）\",")
+                    .append("\"next_action\":\"建议的具体下一步（无则空字符串）\"");
+            if (bindCriterion) {
+                pb.append(",\"criterion_met\":true");
+            }
+            pb.append("}");
             LlmClient.Result r = null;
             if (finalShot != null) {
                 try {
-                    r = client.chatVision(prompt, finalShot, "");
+                    r = client.chatVision(pb.toString(), finalShot, "");
                 } catch (Exception ignored) {
                     r = null;
                 }
             }
-            if (r == null || !r.ok) r = client.chat(prompt);
+            if (r == null || !r.ok) r = client.chat(pb.toString());
             if (!r.ok) return v;
             JSONObject o = AgentLoop.extractJson(r.text);
             if (o == null) return v;
@@ -87,6 +117,13 @@ public class Supervisor {
             v.review = o.optString("review", "");
             v.missing = o.optString("missing", "");
             v.nextAction = o.optString("next_action", "");
+            if (bindCriterion) {
+                v.criterionMet = o.optBoolean("criterion_met", v.completed);
+                // 防模型嘴上说判据没达成、结论却写完成：completed 与 criterion_met 强制一致
+                v.completed = v.criterionMet;
+            } else {
+                v.criterionMet = v.completed;
+            }
             // 一致性修正：说完成但完成度低，或说未完成但完成度满，都以 completed 为准微调
             if (v.completed && v.progressPct < 60) v.progressPct = 80;
             v.ok = true;

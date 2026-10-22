@@ -53,6 +53,25 @@ private boolean stoppedByUser = false;
 private java.util.function.Supplier<String> feedbackSupplier;
 private boolean vdMode = false;
 
+// v3.50 意图层：任务书（run() 开跑前生成，runSession() 每轮钉住+停止线检查；null=生成失败走老路）
+private TaskBook taskBook = null;
+private MasterDict masterDict = null;
+private String dictShort = "";
+/** 本次任务的任务书（供 MainActivity 终审判据绑定 / 后续低置信拦截用；可能为 null） */
+public TaskBook getTaskBook() { return taskBook; }
+// v3.50 第 3 步：低置信拦截——置信度低于阈值时 run() 不进 runSession，三端各自渲染澄清
+private double confThreshold = TaskBook.CONF_THRESHOLD_DEFAULT;
+/** 本次 run() 是否被低置信拦截（三端调用方用 needsClarify() 判别，区别于执行失败） */
+private boolean clarifyState = false;
+/** run() 是否被低置信拦截：true=任务书已生成但置信度不足，三端应渲染澄清而非判失败 */
+public boolean needsClarify() { return clarifyState; }
+/** 澄清问题文本（needsClarify()==true 时有效） */
+public String clarifyQuestion() { return taskBook != null ? taskBook.clarifyQuestion() : ""; }
+/** 澄清选项（可能为空，空时三端请用户自由补充） */
+public java.util.List<String> clarifyOptions() {
+return taskBook != null ? taskBook.clarifyOptions : new java.util.ArrayList<String>();
+}
+
 private TaskRunLogger taskLogger = null;
 private String lastHistory = "";
 private final java.util.List<JSONObject> auditSteps = new java.util.ArrayList<>();
@@ -146,14 +165,88 @@ touchedMain = false;
 supFinalRounds = 0;
 stoppedByUser = false;
 try {
+// v3.51：流光登记收归执行核心——三端（App/TG/远控）都经 run() 执行，
+// 在此统一 begin，finally 统一 end；通道侧登记保留作嵌套外层（引用计数）
+FloatWindow.beginTask(ctx, "🎯 " + goal);
 Telemetry.event(ctx, channel, "task_start", taskData(goal, ""));
 long runStartMs = System.currentTimeMillis();
+// v3.50 意图层：开跑前一次短调用生成任务书（失败/无效→零 token 启发式兜底，再失败走老路）
+// v3.50 第 3 步：低置信拦截——置信度 < 阈值（prefs taskbook_conf_threshold，默认 0.4）时不进 runSession，
+// 三端各自渲染澄清（App 弹选项对话框 / TG 发澄清消息接龙 / 远控 /task 返回 needs_clarify）。
+taskBook = null;
+masterDict = null;
+dictShort = "";
+clarifyState = false;
+try {
+confThreshold = ctx.getSharedPreferences("agent", Context.MODE_PRIVATE)
+.getFloat("taskbook_conf_threshold",
+(float) TaskBook.CONF_THRESHOLD_DEFAULT);
+} catch (Exception ignored) {
+confThreshold = TaskBook.CONF_THRESHOLD_DEFAULT;
+}
+try {
+masterDict = MasterDict.load(ctx.getFilesDir());
+// 记忆分层步骤3：主人词典种子一次性迁入认知库（src=user_seed 直接 active；
+// importSeeds 按 key 幂等，已迁过返回 0 不重复写）。常驻注入数据源切换：
+// MasterDict 硬编码 seeds 只保留为种子来源，任务书/钉住块改读认知库
+// active user_dict（CognitionStore.dictLines/dictShort），种子更新=改条目。
+CognitionStore cogStore = CognitionStore.load(ctx.getFilesDir());
+if (cogStore.importSeeds(masterDict) > 0) {
+cogStore.save(ctx.getFilesDir());
+}
+dictShort = cogStore.dictShort();
+final String dictFull = cogStore.dictLines();
+TaskBook b = TaskBook.generate(new TaskBook.ChatFn() {
+@Override public String chat(String prompt) {
+try {
+LlmClient.Result r = llm.chat(prompt);
+return (r != null && r.ok) ? r.text : null;
+} catch (Exception e) {
+return null;
+}
+}
+}, goal, dictFull);
+if (b == null) b = TaskBook.fromHeuristic(goal);
+if (b != null && b.valid()) {
+taskBook = b;
+log("📋 任务书：对象=" + b.target + "｜动作=" + b.action
++ "｜判据=" + b.criteria + "（置信度 " + b.confidence + "）");
+}
+} catch (Exception e) {
+taskBook = null;
+}
+if (taskBook == null) log("📋 任务书生成失败，按原流程执行");
+// v3.50 第 3 步：低置信拦截——不硬跑，返回澄清态（三端调用方判 needsClarify() 渲染澄清）
+if (taskBook != null && taskBook.needsClarify(confThreshold)) {
+clarifyState = true;
+log("❓ 任务书置信度低（" + taskBook.confidence + " < " + confThreshold
++ "），不硬跑，等待澄清");
+try {
+org.json.JSONObject td = taskData(goal, "低置信拦截");
+td.put("confidence", taskBook.confidence);
+td.put("threshold", confThreshold);
+Telemetry.event(ctx, channel, "task_clarify", td);
+} catch (Exception ignored) {
+}
+return false; // finally 照常清理；经验库不记（任务未实际执行）
+}
 try {
 String exp = SharedMemory.relevantExperience(ctx, goal);
 if (!exp.isEmpty()) {
 conversationContext = conversationContext.isEmpty()
 ? exp : conversationContext + "\n" + exp;
-log("🧠 已注入共享经验（三端历史任务）");
+log("🧠 已注入长期认知（认知库相关条目）");
+}
+} catch (Exception ignored) {
+}
+// 跨通道复现（2026-10-22 用户亲定）：远控旁聊单步操控沉淀的做法
+// （cloud_ops.jsonl）与三端任务经验同等待遇，注入供复现
+try {
+String ops = SharedMemory.relevantCloudOps(ctx, goal);
+if (!ops.isEmpty()) {
+conversationContext = conversationContext.isEmpty()
+? ops : conversationContext + "\n" + ops;
+log("☁ 已注入云端操控沉淀（远控旁聊实操）");
 }
 } catch (Exception ignored) {
 }
@@ -181,6 +274,8 @@ ok ? "" : "未完成");
 }
 return ok;
 } finally {
+// v3.51：与 run() 开头登记配对（引用计数，通道外层登记未结束不熄灯）
+FloatWindow.endTask("");
 boolean wasInVd = false;
 try {
 wasInVd = VirtualDisplayManager.isActive();
@@ -195,14 +290,9 @@ if (supShot != null) {
 try { supShot.recycle(); } catch (Exception ignored) {}
 supShot = null;
 }
-// 铁律：任务结束回桌面——只对操作过主屏的任务；
-// 全程在虚拟屏的任务不打扰主屏（v3.18）
-if (touchedMain && !wasInVd) {
-try {
-Root.exec("input keyevent 3");
-} catch (Exception ignored) {
-}
-}
+// 2026-10-22 用户亲定废止自动回桌面：「不必所有任务执行完都要
+// 回到桌面」——任务停在结束时界面，除非目标本身要求回桌面。
+// （旧铁律 2026-10-17 立、v3.18 起限主屏任务，此处正式移除）
 }
 }
 
@@ -326,6 +416,13 @@ int postClaimActs = 0; // 证据出现后又执行的状态改变动作数
 int upsellWarns = 0; // 链条推销（再看N个提前得…）已提醒次数
 boolean engagedApp = false; // 已有真实应用内操作（launch/tap/vision 等），防说明文本误触发证据扫描
 int turn = 0;
+// v3.50 意图层状态：任务书通用停止线（book 有效且有停止线时启用；否则走旧硬编码兜底）
+final boolean useBookStop = taskBook != null && taskBook.valid()
+&& !taskBook.stopLines.isEmpty();
+boolean stopLineFired = false;
+int stopFireTurn = 0;
+int postStopActs = 0;
+String stopLineAction = "";
 // v3.35 监管看门狗状态：只在死循环/连续失败/幻觉信号时请最强模型介入
 java.util.List<String> wdSigs = new java.util.ArrayList<>();
 java.util.List<String> wdRecent = new java.util.ArrayList<>();
@@ -359,6 +456,17 @@ messages.put(fm);
 }
 
 if (taskLogger!= null) taskLogger.stepStart(turn);
+// v3.50 意图层：任务书钉住——每轮 user 消息首段重注（活在 messages 之外，防 compactMessages 挤掉判据）
+StringBuilder roundObs = new StringBuilder(); // 本轮工具观察文本（停止线检查用）
+if (taskBook != null && taskBook.valid()) {
+try {
+JSONObject pinMsg = new JSONObject();
+pinMsg.put("role", "user");
+pinMsg.put("content", taskBook.describe(dictShort));
+messages.put(pinMsg);
+} catch (Exception ignored) {
+}
+}
 log("🤔 第 " + turn + " 轮思考中...");
 LlmClient.ToolReply tr = llm.chatTools(messages, toolsForSession());
 if (!tr.ok) {
@@ -523,7 +631,8 @@ lastMutationsDone = mutationsDone;
 if (ex.ok && ("launch".equals(name) || "tap".equals(name)
 || "tap_text".equals(name) || "vision".equals(name)
 || "input".equals(name) || "swipe".equals(name))) engagedApp = true;
-if (rewardGoal && !"use_card".equals(name)) {
+// v3.50：任务书停止线启用时，旧的领取证据/链条推销硬编码检测停用（由任务书通用停止线接管）
+if (!useBookStop && rewardGoal && !"use_card".equals(name)) {
 // use_card 返回的是卡片说明文本，含「领取成功」等教学措辞，扫它必误触发
 if (!claimSeen && hasClaimEvidence(ex.text)) {
 claimSeen = true;
@@ -550,6 +659,16 @@ return false;
 }
 }
 }
+// v3.50 意图层：累积本轮观察文本（停止线检查用，防过长裁剪）；
+// 停止线触发后仍调状态改变工具/sleep 计数（与 p2 领取硬停止线同口径）
+try {
+if (ex.text != null && roundObs.length() < 4000) {
+roundObs.append(ex.text.length() > 600 ? ex.text.substring(0, 600) : ex.text).append("\n");
+}
+} catch (Exception ignored) {
+}
+if (useBookStop && stopLineFired && turn > stopFireTurn
+&& (isMutationTool(name) || "sleep".equals(name))) postStopActs++;
 // v3.35 看门狗记录：动作签名/成败/结果摘要（监管介入时回放）
 if (!"observe".equals(name)) {
 String sig = name + "|" + argsJson.replaceAll("\\s+", "");
@@ -669,6 +788,51 @@ um.put("content", "【系统提示】界面出现『再看N个视频/广告提�
 + "不要点『再看』继续看；点『坚持退出』或关闭弹窗。"
 + "若本次目标对象还没领取，回到正常领取流程；已领取就收尾报告。");
 messages.put(um);
+} catch (Exception ignored) {
+}
+}
+// v3.50 意图层：任务书通用停止线命中 → 注入收尾要求；
+// 触发后仍调工具≥2 次 → 强制截停并终审（p2 领取硬停止线的一般化；旧硬编码在 book 缺失时兜底）
+if (useBookStop && !stopLineFired) {
+String fired = null;
+try {
+String h = hist.toString();
+fired = taskBook.checkStop(roundObs.toString(),
+h.length() > 800 ? h.substring(h.length() - 800) : h);
+} catch (Exception ignored) {
+}
+if (fired != null && !fired.isEmpty()) {
+stopLineFired = true;
+stopFireTurn = turn;
+stopLineAction = fired;
+log("🛑 任务书停止线触发：" + fired);
+try {
+JSONObject sm = new JSONObject();
+sm.put("role", "user");
+sm.put("content", "【任务书停止线】已触发——" + fired
++ "。按任务书要求立即收尾：用文字回复报告结果，不要再调用任何工具。");
+messages.put(sm);
+} catch (Exception ignored) {
+}
+}
+}
+if (stopLineFired && postStopActs >= 2) {
+log("🛑 任务书停止线触发后仍继续操作 " + postStopActs + " 次，强制截停并终审");
+Supervisor.Verdict cfv = supervisorEnabled ? finalReview(goal, false, hist.toString()) : null;
+if (cfv == null || !cfv.ok || cfv.completed) {
+if (taskLogger != null) taskLogger.finish(true, "任务书停止线截停：" + stopLineAction);
+lastHistory = hist.toString();
+return true;
+}
+log("🔍 终审认为尚未完成（" + cfv.progressPct + "%），撤销停止线，按终审意见继续");
+stopLineFired = false;
+postStopActs = 0;
+try {
+JSONObject rm3 = new JSONObject();
+rm3.put("role", "user");
+rm3.put("content", "【监管者终审】刚才的停止线信号不构成目标完成。还缺："
++ cfv.missing + "。请只补缺失部分，不要重复已完成步骤。");
+messages.put(rm3);
 } catch (Exception ignored) {
 }
 }
@@ -927,8 +1091,9 @@ if (nodes != null && !nodes.isEmpty()) screenText = serialize(nodes);
 }
 if (screenText.isEmpty()) screenText = "（无控件树信息，见截图）";
 LlmClient sup = supervisorClient != null? supervisorClient: llm;
+// v3.50 意图层：终审判据绑定——把任务书传给监管者，只按任务书完成判据裁决
 Supervisor.Verdict v = Supervisor.review(sup, goal, workerSaid,
-history == null? "": history, screenText, supShot);
+history == null? "": history, screenText, supShot, taskBook);
 // v3.43：终审结果打点——区分终审判错与终审缺席（旧版遥测分不清）
 try {
 org.json.JSONObject fd = new org.json.JSONObject();

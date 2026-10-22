@@ -22,7 +22,11 @@ import java.util.List;
  * - script：脚本类（shell/termux 自动化），content 为 shell 脚本
  * - skill：skill 类（任务步骤 JSON），content 为 {"steps":[...]}
  *
- * 存 files/skill_cards.json
+ * 分开存储（用户 2026-10-22 亲定）：步骤型/脚本型（确定性回放）存
+ * files/skill_cards.json；说明型（自然语言说明、由智能体读后执行）存
+ * files/skill_cards_guide.json。对外仍是统一列表/按 id 查询；load 时
+ * 自愈分流——任一文件里混进错分区的卡都会被重新归位落盘（兼容旧版
+ * 单文件与外部直接写文件的情况）。
  */
 public class SkillCardStore {
 
@@ -53,13 +57,27 @@ public class SkillCardStore {
         public String typeLabel() {
             return TYPE_SCRIPT.equals(type) ? "脚本" : "技能";
         }
+
+        /**
+         * 说明型卡：content 是自然语言操作说明而非步骤 JSON——只能由
+         * 智能体读说明后用工具执行，TaskRunner 单步回放不了（与
+         * TaskRunner.use_card 的 proseCard 判据保持一致）。
+         */
+        public boolean isProse() {
+            if (TYPE_SCRIPT.equals(type)) return false;
+            String ct = content == null ? "" : content.trim();
+            return !(ct.startsWith("[") || ct.startsWith("{"));
+        }
     }
 
     private final File file;
+    private final File guideFile;
     private final List<Card> cards = new ArrayList<>();
 
     public SkillCardStore(Context ctx) {
-        file = new File(ctx.getApplicationContext().getFilesDir(), "skill_cards.json");
+        File dir = ctx.getApplicationContext().getFilesDir();
+        file = new File(dir, "skill_cards.json");
+        guideFile = new File(dir, "skill_cards_guide.json");
         load();
     }
 
@@ -169,9 +187,8 @@ public class SkillCardStore {
                     if (!cj.has("steps")) return "skill 卡的 content 缺少 steps";
                 } else if (t.startsWith("[")) {
                     new JSONArray(t);
-                } else {
-                    return "skill 卡的 content 不是 JSON 对象/数组";
                 }
+                // 其余（不以 {/[ 开头）= 说明型卡的自然语言说明，合法
             }
         } catch (Exception e) {
             return "content 解析失败：" + e.getMessage();
@@ -322,10 +339,17 @@ public class SkillCardStore {
         return out;
     }
 
+    /** 按分区落盘：说明型只进 guide 文件，其余只进主文件 */
     private void save() {
+        writeFile(file, false);
+        writeFile(guideFile, true);
+    }
+
+    private void writeFile(File f, boolean guide) {
         try {
             JSONArray arr = new JSONArray();
             for (Card c : cards) {
+                if (c.isProse() != guide) continue;
                 JSONObject o = new JSONObject();
                 o.put("id", c.id);
                 o.put("name", c.name);
@@ -340,17 +364,30 @@ public class SkillCardStore {
             }
             JSONObject root = new JSONObject();
             root.put("cards", arr);
-            Files.write(file.toPath(), root.toString().getBytes(StandardCharsets.UTF_8));
+            Files.write(f.toPath(), root.toString().getBytes(StandardCharsets.UTF_8));
         } catch (Exception ignored) {
         }
     }
 
     private void load() {
+        // 先读说明型文件（说明型卡以此为准）、再读主文件，并按 id 去重：
+        // 外部写入者若用旧快照把说明型卡复活回主文件，只会被重新归位，
+        // 不会越滚越多（2026-10-22 迁移首夜实测：主文件被反复复活、
+        // guide 一度滚到 18 张重复卡）
+        boolean misplaced = loadFrom(guideFile, true);
+        misplaced |= loadFrom(file, false);
+        // 自愈分流：旧单文件或外部写错分区的卡，重新归位落盘
+        if (misplaced) save();
+    }
+
+    /** 读一份卡文件进内存；返回 true 表示其中有放错分区的卡 */
+    private boolean loadFrom(File f, boolean guide) {
+        boolean misplaced = false;
         try {
-            if (!file.exists()) return;
-            String txt = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
+            if (!f.exists()) return false;
+            String txt = new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
             JSONArray arr = new JSONObject(txt).optJSONArray("cards");
-            if (arr == null) return;
+            if (arr == null) return false;
             for (int i = 0; i < arr.length(); i++) {
                 JSONObject o = arr.getJSONObject(i);
                 Card c = new Card();
@@ -363,9 +400,12 @@ public class SkillCardStore {
                 c.summary = o.optString("summary", "");
                 c.useCount = o.optInt("useCount", 0);
                 c.updatedAt = o.optLong("updatedAt", 0);
+                if (c.isProse() != guide) misplaced = true;
+                if (get(c.id) != null) continue; // 同 id 已加载（去重）
                 cards.add(c);
             }
         } catch (Exception ignored) {
         }
+        return misplaced;
     }
 }

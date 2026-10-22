@@ -36,9 +36,17 @@ public class UpdateManager {
         void onDone(File apk, String err);
     }
 
+    /**
+     * 内置默认更新源（地基·自更新写死）：GitHub 仓库根目录的 version.json，
+     * apkUrl 指向对应 Release 附件。用户在设置里填了源则以用户的为准。
+     */
+    public static final String DEFAULT_SOURCE =
+            "https://raw.githubusercontent.com/Jinzhiying2004/phone-agent-gsic/main/version.json";
+
     public static String getSource(Context ctx) {
-        return ctx.getSharedPreferences("update", Context.MODE_PRIVATE)
+        String s = ctx.getSharedPreferences("update", Context.MODE_PRIVATE)
                 .getString("source", "");
+        return (s == null || s.trim().isEmpty()) ? DEFAULT_SOURCE : s;
     }
 
     public static void setSource(Context ctx, String url) {
@@ -142,11 +150,41 @@ public class UpdateManager {
     }
 
     /**
-     * 调起系统安装。返回 null 表示已调起；
-     * 返回 "need_permission" 表示需用户去设置里允许“安装未知应用”；
-     * 其他字符串为错误原因。
+     * 安装下载好的 APK。地基·自更新写死：有 root 时优先静默安装
+     * （pm install -r，不弹系统安装器），装前落待确认戳，服务重启后
+     * 由 confirmIfUpdated 对账成「更新成功回执」；无 root/静默失败
+     * 再回退系统安装器。
+     * 返回 "silent_ok" 表示已静默安装；null 表示已调起系统安装；
+     * "need_permission" 表示需允许“安装未知应用”；其他为错误原因。
      */
     public static String installApk(Context ctx, File apk) {
+        // 待确认戳：先从待装 APK 读出目标 versionCode
+        int targetCode = 0;
+        try {
+            android.content.pm.PackageInfo pi = ctx.getPackageManager()
+                    .getPackageArchiveInfo(apk.getAbsolutePath(), 0);
+            if (pi != null) targetCode = pi.versionCode;
+        } catch (Exception ignored) {
+        }
+        // root 静默安装
+        try {
+            if (Root.findSu() != null) {
+                if (targetCode > 0) {
+                    ctx.getSharedPreferences("update", Context.MODE_PRIVATE)
+                            .edit().putInt("pending_code", targetCode)
+                            .putLong("pending_ts", System.currentTimeMillis())
+                            .apply();
+                }
+                Process p = Root.exec("pm install -r "
+                        + apk.getAbsolutePath());
+                int rc = p.waitFor();
+                if (rc == 0) return "silent_ok";
+                // 静默失败：清待确认戳，回退系统安装
+                ctx.getSharedPreferences("update", Context.MODE_PRIVATE)
+                        .edit().remove("pending_code").apply();
+            }
+        } catch (Exception ignored) {
+        }
         if (Build.VERSION.SDK_INT >= 26
                 && !ctx.getPackageManager().canRequestPackageInstalls()) {
             return "need_permission";
@@ -161,6 +199,77 @@ public class UpdateManager {
             return null;
         } catch (Exception e) {
             return e.getMessage();
+        }
+    }
+
+    /**
+     * 装后自验（AgentService 每次启动时调）：待确认戳的目标版本与当前
+     * 版本对上（或已被更新的版本越过），即落「更新成功回执」并清戳——
+     * 与开机回执同一思路：地基能力要有证据，不靠"应该装上了"。
+     */
+    public static void confirmIfUpdated(Context ctx) {
+        try {
+            android.content.SharedPreferences p =
+                    ctx.getSharedPreferences("update", Context.MODE_PRIVATE);
+            int pending = p.getInt("pending_code", 0);
+            if (pending <= 0) return;
+            int cur = currentCode(ctx);
+            if (cur >= pending) {
+                p.edit().putLong("update_ok_ts", System.currentTimeMillis())
+                        .putInt("update_ok_code", cur)
+                        .remove("pending_code").apply();
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** 自更新回执文本（自检卡展示） */
+    public static String receiptText(Context ctx) {
+        try {
+            android.content.SharedPreferences p =
+                    ctx.getSharedPreferences("update", Context.MODE_PRIVATE);
+            java.text.SimpleDateFormat f = new java.text.SimpleDateFormat(
+                    "MM-dd HH:mm", java.util.Locale.getDefault());
+            long okTs = p.getLong("update_ok_ts", 0);
+            if (okTs > 0) {
+                return "🔄 自更新：上次成功（code "
+                        + p.getInt("update_ok_code", 0) + "，"
+                        + f.format(new java.util.Date(okTs)) + "）";
+            }
+            int pending = p.getInt("pending_code", 0);
+            if (pending > 0) return "🔄 自更新：目标 code " + pending + " 待确认";
+            String avail = p.getString("avail_version", "");
+            if (!avail.isEmpty()) return "🔄 自更新：有新版 " + avail + " 可装";
+            return "🔄 自更新：暂无记录";
+        } catch (Exception e) {
+            return "🔄 自更新：读取失败";
+        }
+    }
+
+    /** 服务启动时静默检查（24 小时节流）：只记录有无新版，不打扰用户 */
+    public static void silentCheck(Context ctx) {
+        try {
+            android.content.SharedPreferences p =
+                    ctx.getSharedPreferences("update", Context.MODE_PRIVATE);
+            long last = p.getLong("last_check_ts", 0);
+            if (System.currentTimeMillis() - last < 24 * 3600_000L) return;
+            p.edit().putLong("last_check_ts", System.currentTimeMillis()).apply();
+            check(ctx, (hasUpdate, version, code, apkUrl, notes, err) -> {
+                try {
+                    android.content.SharedPreferences.Editor e =
+                            ctx.getSharedPreferences("update",
+                                    Context.MODE_PRIVATE).edit();
+                    if (err == null && hasUpdate) {
+                        e.putString("avail_version", version)
+                                .putInt("avail_code", code);
+                    } else if (err == null) {
+                        e.remove("avail_version").remove("avail_code");
+                    }
+                    e.apply();
+                } catch (Exception ignored) {
+                }
+            });
+        } catch (Exception ignored) {
         }
     }
 

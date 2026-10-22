@@ -32,6 +32,11 @@ public class RemoteTask {
     /** v3.21：远程停止请求（/task/stop 置位，AgentLoop 每轮检查） */
     public volatile boolean stopRequested = false;
     public volatile JSONArray audit = null;
+    // v3.50 第 3 步：低置信拦截状态（/task 返回 needs_clarify，云端决定如何澄清）
+    public volatile boolean needsClarify = false;
+    public volatile String clarifyQuestion = "";
+    public final List<String> clarifyOptions =
+            Collections.synchronizedList(new ArrayList<String>());
 
     public RemoteTask(String goal, int maxSteps) {
         this.taskId = "rt-" + (++seq) + "-" + (startTime % 100000);
@@ -104,6 +109,16 @@ public class RemoteTask {
             for (String l : tail(25)) arr.put(l);
             o.put("log", arr);
             if (audit != null) o.put("audit", audit);
+            // v3.50 第 3 步：低置信拦截时带上澄清问题与选项
+            if (needsClarify) {
+                o.put("needs_clarify", true);
+                o.put("question", clarifyQuestion);
+                JSONArray opts = new JSONArray();
+                synchronized (clarifyOptions) {
+                    for (String s : clarifyOptions) opts.put(s);
+                }
+                o.put("options", opts);
+            }
         } catch (Exception ignored) {
         }
         return o;

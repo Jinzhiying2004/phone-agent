@@ -25,6 +25,7 @@ public class FlowLightDrawable extends Drawable {
     private final float cornerRadius;
     private final int lightColor;
     private final Paint basePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint edgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint flowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint haloPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path borderPath = new Path();
@@ -42,6 +43,8 @@ public class FlowLightDrawable extends Drawable {
         basePaint.setStyle(Paint.Style.FILL);
         flowPaint.setStyle(Paint.Style.STROKE);
         flowPaint.setStrokeCap(Paint.Cap.ROUND);
+        edgePaint.setStyle(Paint.Style.STROKE);
+        edgePaint.setStrokeCap(Paint.Cap.ROUND);
         haloPaint.setStyle(Paint.Style.STROKE);
         haloPaint.setStrokeCap(Paint.Cap.ROUND);
     }
@@ -101,6 +104,14 @@ public class FlowLightDrawable extends Drawable {
 
         float len = pathMeasure.getLength();
         if (len <= 0) return;
+
+        // v3.48-p2：常亮微光边线——整圈先描一条静态细线（三成亮度），
+        // 保证任何时刻都看得出「任务进行中」，不依赖光带位置
+        float coreW0 = Math.max(7, b.width() / 50f);
+        edgePaint.setColor(Color.argb(72, Color.red(lightColor),
+                Color.green(lightColor), Color.blue(lightColor)));
+        edgePaint.setStrokeWidth(Math.max(3f, coreW0 * 0.30f));
+        canvas.drawPath(borderPath, edgePaint);
 
         // 取光带段：头部在 fraction 处，尾部拖 18% 周长
         float head = len * fraction;

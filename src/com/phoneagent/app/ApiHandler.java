@@ -101,6 +101,8 @@ public class ApiHandler implements AgentHttpServer.Handler {
                         .put("service", AgentService.isRunning())
                         .toString();
             case "/screen": {
+                // v3.53：远控单步操控也是在干活——打活动心跳点亮彩条
+                FloatWindow.pulseActivity(ctx);
                 List<AgentAccessibilityService.NodeInfo> items =
                         AgentAccessibilityService.dumpScreen();
                 JSONArray arr = new JSONArray();
@@ -120,6 +122,8 @@ public class ApiHandler implements AgentHttpServer.Handler {
                 if (!"POST".equalsIgnoreCase(method)) {
                     return new JSONObject().put("ok", false).put("error", "POST required").toString();
                 }
+                // v3.53：单步操控心跳（远控旁聊的主要干活方式，此前永不点亮彩条）
+                FloatWindow.pulseActivity(ctx);
                 List<String> logs = new ArrayList<>();
                 TaskRunner r = new TaskRunner(ctx, logs::add);
                 r.setRemote(true);
@@ -195,6 +199,18 @@ public class ApiHandler implements AgentHttpServer.Handler {
                         boolean ok;
                         try {
                             ok = loop.run(goal, maxSteps);
+                            // v3.50 第 3 步：低置信拦截——同步模式直接返回
+                            // needs_clarify（不记经验轮次，任务未实际执行）
+                            if (loop.needsClarify()) {
+                                floatEnd("❓ 远控任务待澄清");
+                                return new JSONObject().put("ok", true)
+                                        .put("needs_clarify", true)
+                                        .put("question", loop.clarifyQuestion())
+                                        .put("options", new JSONArray(
+                                                loop.clarifyOptions()))
+                                        .put("log", new JSONArray(logs))
+                                        .toString();
+                            }
                             // v3.45：结果尾巴三端对齐——带审计步数
                             SharedMemory.addRound(ctx, "remote", goal,
                                     (ok ? "任务完成" : "任务未完成")
@@ -243,22 +259,36 @@ public class ApiHandler implements AgentHttpServer.Handler {
                         rt.log("🎯 远控任务启动：" + goal);
                         try {
                             boolean ok = loop.run(goal, maxSteps);
-                            rt.ok = ok;
-                            // v3.45：结果尾巴三端对齐——带审计步数
-                            SharedMemory.addRound(appCtx, "remote", goal,
-                                    (ok ? "任务完成" : "任务未完成")
-                                            + "，共" + auditSteps(loop) + "步");
-                            try {
-                                rt.audit = new JSONArray(loop.getAuditJson());
-                            } catch (Exception ignored) {
+                            // v3.50 第 3 步：低置信拦截——记到 RemoteTask，
+                            // 云端经 /task/status 取澄清问题；不记经验轮次
+                            if (loop.needsClarify()) {
+                                rt.needsClarify = true;
+                                rt.clarifyQuestion = loop.clarifyQuestion();
+                                rt.clarifyOptions.addAll(loop.clarifyOptions());
+                                rt.ok = false;
+                                rt.log("❓ 任务书置信度低，等待澄清");
+                            } else {
+                                rt.ok = ok;
+                                // v3.45：结果尾巴三端对齐——带审计步数
+                                SharedMemory.addRound(appCtx, "remote", goal,
+                                        (ok ? "任务完成" : "任务未完成")
+                                                + "，共" + auditSteps(loop) + "步");
+                                try {
+                                    rt.audit = new JSONArray(loop.getAuditJson());
+                                } catch (Exception ignored) {
+                                }
                             }
                         } catch (Exception e) {
                             rt.error = String.valueOf(e.getMessage());
                         } finally {
                             rt.done = true;
                             TaskLock.release("remote"); // v3.11 Issue 14
-                            rt.log(rt.ok ? "✅ 远控任务完成" : "⏹ 远控任务结束");
-                            floatEnd(rt.ok ? "✅ 远控任务完成" : "⏹ 远控任务结束");
+                            rt.log(rt.needsClarify ? "❓ 远控任务待澄清"
+                                    : (rt.ok ? "✅ 远控任务完成"
+                                            : "⏹ 远控任务结束"));
+                            floatEnd(rt.needsClarify ? "❓ 远控任务待澄清"
+                                    : (rt.ok ? "✅ 远控任务完成"
+                                            : "⏹ 远控任务结束"));
                         }
                     }, "remote-task-" + rt.taskId).start();
                     return new JSONObject().put("ok", true).put("started", true)
@@ -343,6 +373,8 @@ public class ApiHandler implements AgentHttpServer.Handler {
                 if (!"GET".equalsIgnoreCase(method)) {
                     return new JSONObject().put("ok", false).put("error", "GET required").toString();
                 }
+                // v3.53：操控中的截图同样算活动（远控旁聊靠它盯屏）
+                FloatWindow.pulseActivity(ctx);
                 try {
                     byte[] png = null;
                     String via = null;

@@ -1,5 +1,20 @@
 # 更新日志
 
+## v3.54（2026-10-22）
+地基写死三：①自更新打通——内置默认更新源（GitHub 仓库 version.json，用户设置仅覆盖），build.sh 自动生成带 Release 直链的 version.json；root 优先静默安装（pm install -r，装前落 pending 戳、失败清戳回退系统安装）；装后自验：服务启动对账落「更新成功回执」，自检卡可见；服务启动静默检查（24h 节流、只记不扰）。②回桌面铁律废止（用户 21:02 亲定）：任务结束不再自动回桌面，停在结束时界面。③跨通道复现：远控旁聊沉淀的 cloud_ops.jsonl 自动导入、按相似度注入任务上下文，三通道共享成功做法。④技能卡分开存储：说明型卡独立存 skill_cards_guide.json（步骤/脚本型留原文件），load 自愈分流、技能中心分区展示。⑤技能卡运行修复：说明型卡点「运行」转智能体任务（此前零动作报完成）。⑥热更新诊断内置 PatchDiag（E1 决定性实验）：attach 与服务启动两时刻 dump ClassLoader 元素构成+补丁类 CodeSource，落 files/patch_diag.txt，供远控读回判定注入是否真生效；发版后推送探针补丁即出判读结论。
+
+## v3.53（2026-10-22）
+地基写死二（用户实证：远控旁聊下指令、手机在执行却没彩条）：根因——远控旁聊干活是 /action 单步操控，不走 AgentLoop 任务，彩条只认任务登记故永不点亮（历次实测测 /task，与实际用法错位）。修：FloatWindow 加活动心跳 pulseActivity（20s 租约）+ isActive() 统一判据（任务登记 OR 心跳）；ApiHandler 对 /action、/screen、/screenshot 打心跳；看门狗按 isActive 守窗、心跳到期自动收窗；endTask 延迟关窗守卫与内嵌彩条（v3.52）同改认 isActive；forceEnd 清心跳。
+
+## v3.52（2026-10-22）
+地基写死一（用户亲定：流光/热更新/自更新/自启动写死到软件里且带自验证）：①软件内嵌彩条——MainActivity 根布局最上层加一条同款 FlowLightDrawable 彩条（不消费触摸），500ms 对表 FloatWindow.isTaskActive（三端同一状态源），任务在跑打开软件必见，与悬浮流光双保险，不受悬浮窗权限/系统隐藏策略影响；②开机自启回执——BootReceiver 收到 BOOT_COMPLETED 落 boot_ts，AgentService.onCreate 确认落 boot_ok_ts（15 分钟窗口），自检卡新增一行「🚀 开机自启：上次成功 MM-dd HH:mm / 待验证 / 暂无回执」。
+
+## v3.51（2026-10-22）
+流光跨通道彻底修复（用户实测：换通道下指令任务在跑却没彩光）：根因——流光登记按通道各接各的，App 通道任务没走 beginTask 登记，taskActive 没置上→缺窗自愈/切出补弹全失效，一次弹失败黑全程；endTask 延迟关窗无代际守卫，背靠背任务误杀新窗；show() 异常静默吞。四修：①登记收归 AgentLoop.run()（三端统一 begin/finally end），通道登记保留作嵌套外层；②FloatWindow 登记改引用计数，计数未归零不熄灯（App 监管多轮不闪断）；③延迟关窗加 gen 代际守卫；④2 秒看门狗断言补窗 + show 失败落 Log/Telemetry；/stop 改 forceEnd 立即熄灯清零；App 每轮 show() 改 assertShown 不再 hide+重加。
+
+## v3.50（2026-10-22）
+意图层（用户定调：笨在工作流不在模型，模型档位不动；排期 v3.50）：①开跑前生成结构化任务书（对象/动作/完成判据/停止线/禁区/置信度），一次短 LLM 调用 + 零 token 启发式兜底（生成失败不断链）；②任务书钉住：每轮 user 消息首段重注判据与停止线，防 compactMessages 压缩挤掉；③终审判据绑定：监管者只按任务书完成判据裁决，输出加 criterion_met，completed 与判据强制一致，防"有进展无证据却说完成"；④停止线自任务书生成：信号命中注入收尾指令，再执行超 2 工具强制截停，旧领取类硬编码保留兜底；⑤低置信（<0.4）拦截反问：App 弹选项对话框、TG 发澄清接龙、远控返回 needs_clarify，三端各渲染；⑥主人词典种子版（clash=Clash_For_Magisk 模块非 App、领时长路径、完事回桌面、音乐收尾停播清后台），生成与执行两处注入。另含流光边框两修（用户 10-22 亲定）：常亮微光边线（全周静态细线打底）+ 任务运行中软件内也必显示流光（取消 inApp 拦截）。JVM 实测：17 项全过（生成 mock/失败兜底/clash 词典题/汽水判据题/50 轮钉住压缩后尾部存活/终审判据绑定双向/老签名不变）。
+
 ## v3.49（2026-10-21）
 TG 执行完的自动回复引用触发消息：记住触发指令的 message_id，/agent、/task 与闲聊的进度/结果消息带 reply_parameters 以引用回复形式发出，执行完的总结挂在用户原指令下，多条指令连发时一眼对应；/help 同步说明。
 

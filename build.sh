@@ -90,11 +90,13 @@ import json, re
 m = open('AndroidManifest.xml').read()
 vc = re.search(r'versionCode=\"(\d+)\"', m).group(1)
 vn = re.search(r'versionName=\"([\d.]+)\"', m).group(1)
-json.dump({'version': vn, 'versionCode': int(vc), 'apkUrl': '',
+apk_url = ('https://github.com/Jinzhiying2004/phone-agent-gsic'
+           '/releases/download/v%s/phone-agent-%s.apk' % (vn, vn))
+json.dump({'version': vn, 'versionCode': int(vc), 'apkUrl': apk_url,
            'notes': ''}, open('../version.json', 'w'), ensure_ascii=False, indent=2)
 print(open('../version.json').read())
 "
-echo "提示：把 version.json 的 apkUrl 填上 APK 直链后，和 APK 一起放到更新源"
+echo "提示：version.json 已自动填 Release 直链；发版时把 version.json 提交进仓库根目录、APK 传到对应 Release，软件内自更新即通"
 
 echo "== 7/7 归档热补丁基线 =="
 VC=$(grep -o 'versionCode="[0-9]*"' AndroidManifest.xml | grep -o '[0-9]*')

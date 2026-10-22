@@ -48,6 +48,20 @@ public class TgBot {
     // v3.38：TG 最近对话（给 agent 补上下文，帮它理解指代与真实意图）
     private Thread thread;
     private long offset = 0;
+    // v3.50 第 3 步：低置信澄清接龙——chatId → 待澄清（原目标+选项+触发消息 id），
+    // 用户下一条非指令文本即视为澄清回答
+    private static class ClarifyPending {
+        final String goal;
+        final java.util.List<String> options;
+        final long replyTo;
+        ClarifyPending(String g, java.util.List<String> o, long r) {
+            goal = g;
+            options = o != null ? o : new java.util.ArrayList<String>();
+            replyTo = r;
+        }
+    }
+    private final java.util.Map<Long, ClarifyPending> pendingClarify =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     public TgBot(Context ctx, TgStore store, LlmStore llmStore, Listener listener) {
         this.ctx = ctx.getApplicationContext();
@@ -147,6 +161,21 @@ public class TgBot {
             return; // 未绑定时其他消息一律忽略
         }
         if (chatId != store.getOwner()) return; // 陌生人忽略
+
+        // v3.50 第 3 步：澄清接龙——有待澄清时，下一条非指令文本即视为澄清回答；
+        // 任何 "/" 指令都先清掉待澄清（/new、/stop 等已有清理语义兜底）
+        if (!text.startsWith("/")) {
+            ClarifyPending cp = pendingClarify.remove(chatId);
+            if (cp != null) {
+                String answer = parseClarifyAnswer(text, cp.options);
+                log("❓ TG 澄清回答：" + brief(answer));
+                runAgentCmd(chatId,
+                        cp.goal + "（用户明确：" + answer + "）", cp.replyTo);
+                return;
+            }
+        } else {
+            pendingClarify.remove(chatId);
+        }
 
         log("📩 " + brief(text));
         try {
@@ -268,6 +297,36 @@ public class TgBot {
         } catch (Exception ignored) {
         }
         return goal;
+    }
+
+    /**
+     * v3.50 第 3 步：解析澄清回答。
+     * ①序号（1-4 / ①②③④）→ 取对应选项；②选项文本命中 → 取该选项；
+     * ③否则视为用户自由补充的说明，原样返回。
+     */
+    private String parseClarifyAnswer(String text,
+                                      java.util.List<String> options) {
+        String t = text == null ? "" : text.trim();
+        int idx = -1;
+        if (t.matches("[1-4]")) {
+            idx = t.charAt(0) - '1';
+        } else if (!t.isEmpty()) {
+            int p = "①②③④".indexOf(t.charAt(0));
+            if (p >= 0) idx = p;
+        }
+        if (idx >= 0 && options != null && idx < options.size()) {
+            return options.get(idx);
+        }
+        if (options != null) {
+            for (String o : options) {
+                if (o == null || o.isEmpty()) continue;
+                if (o.equals(t)) return o;
+                if (t.length() >= 2 && (t.contains(o) || o.contains(t))) {
+                    return o;
+                }
+            }
+        }
+        return t;
     }
 
     private void runAgentCmd(long chatId, String goal) {
@@ -454,6 +513,21 @@ public class TgBot {
         } finally {
             tgTaskRunning = false;
             TaskLock.release("tg");
+        }
+        // v3.50 第 3 步：低置信拦截——发澄清问题并登记接龙，不记经验轮次（任务未实际执行）
+        if (loop.needsClarify()) {
+            String q = "❓ 需要确认一下\n" + loop.clarifyQuestion()
+                    + "\n（回复序号即可；换话题发 /new）";
+            pendingClarify.put(chatId,
+                    new ClarifyPending(goal, loop.clarifyOptions(), replyTo));
+            floatEnd("❓ TG任务待澄清");
+            if (progressId > 0) {
+                editMessage(chatId, progressId, q);
+            } else {
+                sendMessage(chatId, q, replyTo);
+            }
+            log("[agent] ❓ 低置信拦截，已发澄清等待用户回复");
+            return;
         }
         floatEnd(done ? "✅ TG任务完成" : "⏹ TG任务结束");
         // v3.37：结尾只发简短总结（状态+答复+用时/步数），不再倒整段日志
