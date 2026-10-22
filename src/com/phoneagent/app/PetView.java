@@ -137,8 +137,8 @@ public class PetView extends View {
         super.onSizeChanged(w, h, ow, oh);
         viewW = w;
         viewH = h;
-        sizePx = Math.min(w, h) * 0.30f;
-        inset = sizePx * 0.46f;
+        sizePx = Math.min(w, h) * 0.27f;
+        inset = sizePx * 0.42f;
         segW = Math.max(10, w - 2 * inset);
         segH = Math.max(10, h - 2 * inset);
         perim = 2 * (segW + segH);
