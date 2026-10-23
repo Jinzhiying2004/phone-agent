@@ -156,6 +156,9 @@ public class ApiHandler implements AgentHttpServer.Handler {
                         LocalIntentRouter.RouteResult rr =
                                 LocalIntentRouter.tryRoute(ctx, goal);
                         if (rr != null && rr.handled) {
+                            // v3.51 步骤5：本地路由决策点打点（零 token 直达）
+                            Telemetry.decisionPoint(ctx, "remote", "local_route", 1.0,
+                                    goal, "local_route", 1.0, null);
                             TaskLock.release("remote");
                             return new JSONObject().put("ok", true)
                                     .put("via", "local")
@@ -219,6 +222,10 @@ public class ApiHandler implements AgentHttpServer.Handler {
                             // v3.32：异常也要释放，否则远控永久"任务忙"
                             TaskLock.release("remote");
                         }
+                        // v3.56 记忆分层·步骤7：远控会话边界——任务结束清共享轮次。
+                        // needs_clarify 路径已在 try 内提前 return，不经过此处，
+                        // 澄清往返的跟进 /task 仍能读到上一轮上下文。
+                        SharedMemory.clear(ctx);
                         floatEnd(ok ? "✅ 远控任务完成" : "⏹ 远控任务结束");
                         JSONObject resp = new JSONObject().put("ok", ok)
                                 .put("log", new JSONArray(logs));
@@ -289,6 +296,14 @@ public class ApiHandler implements AgentHttpServer.Handler {
                             floatEnd(rt.needsClarify ? "❓ 远控任务待澄清"
                                     : (rt.ok ? "✅ 远控任务完成"
                                             : "⏹ 远控任务结束"));
+                            // v3.56 记忆分层·步骤7：远控任务结束清共享轮次；
+                            // 待澄清时不清，等澄清跟进的 /task 接着读上下文。
+                            if (!rt.needsClarify) {
+                                try {
+                                    SharedMemory.clear(appCtx);
+                                } catch (Exception ignored) {
+                                }
+                            }
                         }
                     }, "remote-task-" + rt.taskId).start();
                     return new JSONObject().put("ok", true).put("started", true)

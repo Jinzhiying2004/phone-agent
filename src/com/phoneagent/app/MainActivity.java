@@ -987,6 +987,9 @@ public class MainActivity extends Activity {
         if (localRr != null) {
             agentLog((localRr.handled ? "✅ " : "⚠️ ") + localRr.message);
             if (localRr.handled) {
+                // v3.51 步骤5：本地路由决策点打点（零 token 直达）
+                Telemetry.decisionPoint(this, "app", "local_route", 1.0,
+                        goal, "local_route", 1.0, null);
                 historyStore.append("⚡本地：" + goal, true);
                 runOnUiThread(this::refreshHistory);
                 return;

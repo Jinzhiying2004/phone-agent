@@ -39,6 +39,10 @@ private final Listener listener;
 private boolean allowAdvanced = true;
 private ActionRisk.Policy riskPolicy = null;
 private TaskRunner.Approver approver = null;
+/** v3.51 步骤5：遥测打点状态——本任务内各病因计数、上一步时间戳、工具截图哈希 */
+private final java.util.Map<String, Integer> runFailClass = new java.util.HashMap<String, Integer>();
+private long lastStepT0 = 0;
+private long toolLastHash = 0;
 private boolean remote = false;
 private String conversationContext = "";
 private String planHint = "";
@@ -52,10 +56,16 @@ private int lastMutationsDone = 0;
 private boolean stoppedByUser = false;
 private java.util.function.Supplier<String> feedbackSupplier;
 private boolean vdMode = false;
+// 主从互斥（2026-10-23 用户亲定）：本任务主显示是否锁定为虚拟屏。
+// runSession 开始时按通道与创建结果钉死，任务内不再变更：
+// true=全部操作/截图/终审只走虚拟屏，实体屏仅右上角小窗预览（从显示）；
+// false=主显示锁定实体屏。VD 中途失效不回退实体屏（防双屏各留一份）。
+private boolean taskPrimaryVd = false;
 
 // v3.50 意图层：任务书（run() 开跑前生成，runSession() 每轮钉住+停止线检查；null=生成失败走老路）
 private TaskBook taskBook = null;
 private MasterDict masterDict = null;
+private CognitionStore cogStore = null;
 private String dictShort = "";
 /** 本次任务的任务书（供 MainActivity 终审判据绑定 / 后续低置信拦截用；可能为 null） */
 public TaskBook getTaskBook() { return taskBook; }
@@ -170,6 +180,20 @@ try {
 FloatWindow.beginTask(ctx, "🎯 " + goal);
 Telemetry.event(ctx, channel, "task_start", taskData(goal, ""));
 long runStartMs = System.currentTimeMillis();
+// v3.51 步骤5：模型画像打点——本任务内所有 LlmClient 调用经 sink 记 model_call
+// （不记 prompt 原文；监管者/任务书短调用同样覆盖）
+final String sinkCh = channel;
+LlmClient.setTelemetrySink(new LlmClient.ModelCallSink() {
+    @Override public void onCall(String model, long latencyMs, long tokIn, long tokOut,
+                                 boolean timeout, int retries) {
+        Telemetry.modelCall(ctx, sinkCh, model, latencyMs,
+                tokIn, tokOut, timeout, retries);
+    }
+});
+// v3.51 步骤5：本任务打点状态清零
+runFailClass.clear();
+toolLastHash = 0;
+lastStepT0 = 0;
 // v3.50 意图层：开跑前一次短调用生成任务书（失败/无效→零 token 启发式兜底，再失败走老路）
 // v3.50 第 3 步：低置信拦截——置信度 < 阈值（prefs taskbook_conf_threshold，默认 0.4）时不进 runSession，
 // 三端各自渲染澄清（App 弹选项对话框 / TG 发澄清消息接龙 / 远控 /task 返回 needs_clarify）。
@@ -190,8 +214,9 @@ masterDict = MasterDict.load(ctx.getFilesDir());
 // importSeeds 按 key 幂等，已迁过返回 0 不重复写）。常驻注入数据源切换：
 // MasterDict 硬编码 seeds 只保留为种子来源，任务书/钉住块改读认知库
 // active user_dict（CognitionStore.dictLines/dictShort），种子更新=改条目。
-CognitionStore cogStore = CognitionStore.load(ctx.getFilesDir());
-if (cogStore.importSeeds(masterDict) > 0) {
+// 记忆分层步骤4：图标词典通用符号种子幂等导入（src=user_seed 直接 active）。
+cogStore = CognitionStore.load(ctx.getFilesDir());
+if (cogStore.importSeeds(masterDict) + cogStore.importIconSeeds() > 0) {
 cogStore.save(ctx.getFilesDir());
 }
 dictShort = cogStore.dictShort();
@@ -216,6 +241,22 @@ log("📋 任务书：对象=" + b.target + "｜动作=" + b.action
 taskBook = null;
 }
 if (taskBook == null) log("📋 任务书生成失败，按原流程执行");
+// v3.51 步骤5：决策点打点——路由命中与分数、意图解析、任务书置信度、计划分步
+// （本地路由命中的任务不进 run()，由三端通道侧各自打点 route_name=local_route）
+try {
+    java.util.List<String> planSteps = new java.util.ArrayList<String>();
+    if (taskBook != null && taskBook.valid()) {
+        if (!taskBook.criteria.isEmpty()) planSteps.add(taskBook.criteria);
+        for (TaskBook.StopLine sl : taskBook.stopLines) {
+            if (sl != null && !sl.signal.isEmpty()) planSteps.add(sl.signal);
+        }
+    }
+    Telemetry.decisionPoint(ctx, channel, "llm_agent", 0.0,
+            taskBook != null ? taskBook.target : "",
+            taskBook != null ? taskBook.action : "",
+            taskBook != null ? taskBook.confidence : -1.0,
+            planSteps);
+} catch (Exception ignored) {}
 // v3.50 第 3 步：低置信拦截——不硬跑，返回澄清态（三端调用方判 needsClarify() 渲染澄清）
 if (taskBook != null && taskBook.needsClarify(confThreshold)) {
 clarifyState = true;
@@ -269,11 +310,13 @@ Telemetry.event(ctx, channel, "task_end", td);
 try {
 SharedMemory.addExperience(ctx, channel, goal, ok,
 System.currentTimeMillis() - runStartMs, lastActionsDone,
-ok ? "" : "未完成");
+expNote(ok));
 } catch (Exception ignored) {
 }
 return ok;
 } finally {
+// v3.51 步骤5：模型画像打点只活本任务，退出即卸 sink
+LlmClient.setTelemetrySink(null);
 // v3.51：与 run() 开头登记配对（引用计数，通道外层登记未结束不熄灯）
 FloatWindow.endTask("");
 boolean wasInVd = false;
@@ -286,6 +329,8 @@ log("虚拟屏已销毁");
 } catch (Exception ignored) {
 }
 vdMode = false;
+taskPrimaryVd = false;
+PhoneTools.sessionDisplayLock = "";
 if (supShot != null) {
 try { supShot.recycle(); } catch (Exception ignored) {}
 supShot = null;
@@ -349,11 +394,16 @@ TaskRunner runner = new TaskRunner(ctx, listener::onLog);
 if (riskPolicy!= null) runner.setRiskPolicy(riskPolicy);
 runner.setApprover(approver);
 runner.setRemote(remote);
+runner.setCognitionStore(cogStore);
 // v3.36 通道分工：只有 App 内命令走虚拟屏（自动开屏 + 右上角悬浮预览）；
 // TG/远控在主屏正常执行（PhoneTools 会拒绝其 vd_start）。
 PhoneTools.sessionChannel = channel;
 VirtualDisplayManager.setPreviewEnabled("app".equals(channel));
 runner.setVdMode(false);
+// 主从关系钉死：先默认主显示=实体屏；App 通道成功建屏后改钉虚拟屏。
+// 降级只发生在此刻（任何动作执行之前），任务开始后不再跨屏。
+taskPrimaryVd = false;
+PhoneTools.sessionDisplayLock = "main";
 if ("app".equals(channel)) {
 try {
 boolean vdOn = ctx.getSharedPreferences("agent", Context.MODE_PRIVATE)
@@ -363,9 +413,11 @@ int did = VirtualDisplayManager.create(ctx, 720, 1280, 320);
 if (did >= 0) {
 runner.setVdMode(true);
 vdMode = true;
-log("🖥 App 通道：任务在虚拟屏执行（右上角悬浮预览中）");
+taskPrimaryVd = true;
+PhoneTools.sessionDisplayLock = "vd";
+log("🖥 App 通道：主显示锁定虚拟屏（实体屏右上角小窗仅实时预览）");
 } else {
-log("虚拟屏创建失败，改在主屏执行");
+log("虚拟屏创建失败，本任务改在实体屏执行（主显示锁定实体屏）");
 }
 }
 } catch (Exception ignored) {
@@ -423,6 +475,7 @@ boolean stopLineFired = false;
 int stopFireTurn = 0;
 int postStopActs = 0;
 String stopLineAction = "";
+java.util.Set<String> bookBranchReminded = new java.util.HashSet<>(); // 步骤6：判据分支收尾提醒已提醒集合（每分支只提醒一次）
 // v3.35 监管看门狗状态：只在死循环/连续失败/幻觉信号时请最强模型介入
 java.util.List<String> wdSigs = new java.util.ArrayList<>();
 java.util.List<String> wdRecent = new java.util.ArrayList<>();
@@ -442,6 +495,15 @@ log("已手动停止");
 lastHistory = hist.toString();
 return false;
 }
+// v3.51 步骤5：每步环境打点（前台包/网络/步耗时/任务累计耗时）
+// fgPackage 复用 TaskRunner 的 10s TTL 缓存，零额外开销
+try {
+long stepT0 = System.currentTimeMillis();
+long prevMs = lastStepT0 > 0 ? stepT0 - lastStepT0 : 0;
+lastStepT0 = stepT0;
+Telemetry.stepEnv(ctx, channel, runner.fgPackage(), netOk(),
+prevMs, stepT0 - sessionStartMs);
+} catch (Exception ignored) {}
 // 用户实时反馈（App 通道）
 try {
 String fb = feedbackSupplier!= null? feedbackSupplier.get(): null;
@@ -610,9 +672,17 @@ String argsJson = call.optString("argsJson", "{}");
 String callId = call.optString("id");
 log("🖐 " + name);
 hist.append("🖐 ").append(name).append(" ").append(argsJson).append("\n");
-boolean vdNow = false;
-try { vdNow = VirtualDisplayManager.isActive(); } catch (Exception ignored) {}
+boolean vdNow = taskPrimaryVd;
+if (taskPrimaryVd && !VirtualDisplayManager.isActive()) {
+// 主显示失效不回退实体屏：回退会让同一任务在双屏各留一份、后续点错屏。
+log("⛔ 虚拟屏主显示已失效，任务中止（不回退实体屏，防双屏错乱）");
+lastHistory = hist.toString();
+return false;
+}
+// v3.51 步骤5：工具耗时（tool_result 用）
+long toolT0 = System.currentTimeMillis();
 PhoneTools.Exec ex = PhoneTools.execute(ctx, runner, name, argsJson, vdNow);
+long toolMs = System.currentTimeMillis() - toolT0;
 if (!vdNow && !"observe".equals(name)) touchedMain = true;
 vdMode = vdNow;
 if (!"observe".equals(name)) {
@@ -723,6 +793,24 @@ td.put("ok", ex.ok);
 if (!ex.ok) td.put("err", Telemetry.cut(ex.text, 90));
 Telemetry.event(ctx, channel, "tool_call", td);
 } catch (Exception ignored2) {
+}
+// v3.51 步骤5：工具结果打点——动作/成败/病因分类/画面变化量/耗时
+// screen_delta：相邻两次工具截图的 8x8 均值哈希汉明距离（无截图时 -1）
+try {
+int screenDelta = -1;
+String failClass = Telemetry.classifyFail(name, ex.ok, ex.text);
+if (ex.shot != null) {
+long h = avgHash(ex.shot);
+if (toolLastHash != 0) screenDelta = (int) Long.bitCount(h ^ toolLastHash);
+toolLastHash = h;
+}
+if (failClass != null) {
+Integer c = runFailClass.get(failClass);
+runFailClass.put(failClass, c == null ? 1 : c + 1);
+}
+Telemetry.toolResult(ctx, channel, name, ex.ok, failClass,
+screenDelta, toolMs, ex.text);
+} catch (Exception ignored3) {
 }
 } catch (Exception ignored) {
 }
@@ -836,6 +924,22 @@ messages.put(rm3);
 } catch (Exception ignored) {
 }
 }
+// 步骤6：判据分支收尾提醒——任务书某判据分支关键词已命中最近工具结果时，软提醒一次"可收尾"（不截停）
+if (useBookStop && !stopLineFired && taskBook != null) {
+try {
+String hit = taskBook.branchHit(roundObs.toString());
+if (hit != null && !bookBranchReminded.contains(hit)) {
+bookBranchReminded.add(hit);
+log("💡 任务书判据分支「" + hit + "」已有证据，可考虑收尾（提醒一次）");
+JSONObject bm = new JSONObject();
+bm.put("role", "user");
+bm.put("content", "【任务书收尾提醒】判据分支「" + hit + "」已有证据（最近工具结果出现「" + hit + "」）。"
++ "如果目标已达成，直接收尾报告；还差其他判据分支请继续，不要重复已满足的步骤。");
+messages.put(bm);
+}
+} catch (Exception ignored) {
+}
+}
 // v3.35 监管看门狗：有异常信号才触发最强模型裁决，无信号零打扰
 if (supervisorEnabled) {
 String trigger = null;
@@ -877,6 +981,10 @@ if (trigger != null) {
 wdLastCheckTurn = turn;
 if (wdInterventions >= 3) {
 log("🛡 监管者已介入 3 次仍无改善，任务结束：" + trigger);
+// v3.51 步骤5：监管中止打点
+try {
+Telemetry.supervisory(ctx, channel, "watchdog", "abort", trigger);
+} catch (Exception ignored) {}
 if (taskLogger != null) taskLogger.finish(false, "监管多次介入无改善");
 lastHistory = hist.toString();
 return false;
@@ -895,6 +1003,12 @@ fd.put("trigger", Telemetry.cut(trigger, 60));
 fd.put("action", iv.ok ? iv.action : "unavailable");
 Telemetry.event(ctx, channel, "model_flag", fd);
 } catch (Exception ignored) {}
+// v3.51 步骤5：监管事件打点（规则/裁决/依据）
+try {
+String verdict = !iv.ok ? "unavailable" : iv.action;
+Telemetry.supervisory(ctx, channel, "watchdog", verdict,
+trigger + " | " + (iv.ok ? iv.message : "监管者不可用"));
+} catch (Exception ignored2) {}
 if (!iv.ok) {
 log("🛡 监管者暂时不可用（" + trigger + "），继续执行");
 wdCooldown = 8;
@@ -962,14 +1076,18 @@ p.append("环境：").append(android.os.Build.MANUFACTURER).append(" ")
 .append("；root ").append(hasRoot? "有": "无")
 .append("；无障碍 ").append(a11yOn? "已开": "未开").append("。");
 if (hasRoot) p.append("截屏与点击有 root 通道兜底。");
-if ("app".equals(channel)) {
-p.append("本任务在虚拟屏中执行（用户能在屏幕右上角看到预览），不打扰主屏；确需操作主屏当前状态时可调 vd_stop 切回主屏。");
+if (taskPrimaryVd) {
+p.append("本任务主显示锁定为虚拟屏：全部操作只在虚拟屏进行，不打扰实体屏；实体屏右上角小窗只是实时预览（从显示），不承载任务。任务结束前不能切到实体屏（vd_stop 会被拒绝），不要尝试。确需实体屏当前状态的活，请收尾时在结论里说明、另起一个实体屏任务。");
 } else {
-p.append("本任务在主屏执行，直接操作即可。");
+p.append("本任务主显示锁定为实体屏：直接在实体屏操作，不要尝试开虚拟屏（vd_start 会被拒绝）。");
 }
 p.append("先理解用户真正要什么再动手：结合对话上下文和当前界面理解指代与言外之意，按目标推进，不要逐字死磕字面步骤；此路不通时换方法继续朝目标走。");
 p.append("\n你通过工具看屏和操作（执行通道 root 优先，无 root 才用无障碍）。完成任务后，用一段文字回复用户结果（不再调工具即结束）。");
 p.append("领取/奖励类任务的停止线：界面出现『领取成功/已领取』就代表本次目标对象已到账，立即收尾报告；『再看N个提前得明日/下一份』是 App 的链条推销，属于目标外，一律不跟进，点『坚持退出』退出。");
+if (cogStore != null) {
+String icons = cogStore.iconBlock(null);
+if (!icons.isEmpty()) p.append("\n").append(icons);
+}
 String cards = skillCardsSection(goal);
 if (!cards.isEmpty()) p.append("\n").append(cards);
 if (!conversationContext.isEmpty()) {
@@ -1083,6 +1201,10 @@ private Supervisor.Verdict finalReview(String goal, boolean workerSaid,
 String history) {
 try {
 String screenText = "";
+if (taskPrimaryVd) {
+// 主从互斥：虚拟屏任务的终审只认虚拟屏截图，实体屏控件树是另一个屏的状态，混入会误判
+screenText = "（虚拟屏主显示任务：实体屏控件树不适用，以附带的虚拟屏截图为唯一界面证据）";
+} else {
 try {
 java.util.List<AgentAccessibilityService.NodeInfo> nodes =
 AgentAccessibilityService.dumpScreen();
@@ -1090,6 +1212,7 @@ if (nodes != null && !nodes.isEmpty()) screenText = serialize(nodes);
 } catch (Exception ignored) {
 }
 if (screenText.isEmpty()) screenText = "（无控件树信息，见截图）";
+}
 LlmClient sup = supervisorClient != null? supervisorClient: llm;
 // v3.50 意图层：终审判据绑定——把任务书传给监管者，只按任务书完成判据裁决
 Supervisor.Verdict v = Supervisor.review(sup, goal, workerSaid,
@@ -1103,6 +1226,15 @@ fd.put("result", v == null? "null": (!v.ok? "error":
 if (v != null) fd.put("pct", v.progressPct);
 Telemetry.event(ctx, channel, "model_flag", fd);
 } catch (Exception ignored) {
+}
+// v3.51 步骤5：终审裁决打点（规则/裁决/依据）
+try {
+String verdict = v == null ? "null"
+: (!v.ok ? "error" : (v.completed ? "pass" : "reject"));
+String basis = "完成度约" + (v == null ? "?" : v.progressPct + "%")
++ (v != null && !v.missing.isEmpty() ? "，还缺：" + v.missing : "");
+Telemetry.supervisory(ctx, channel, "final_review", verdict, basis);
+} catch (Exception ignored2) {
 }
 return v;
 } catch (Exception e) {
@@ -1162,6 +1294,43 @@ try {
 Thread.sleep(ms);
 } catch (InterruptedException e) {
 Thread.currentThread().interrupt();
+}
+}
+
+// ---------------- v3.51 步骤5：遥测打点辅助 ----------------
+
+/**
+ * 经验备注：失败任务附带本轮最高频病因（步骤5 遥测回填，供 Distiller 读 note 时参考）。
+ * ok 的任务备注为空（与旧口径一致）。
+ */
+private String expNote(boolean ok) {
+if (ok) return "";
+String top = topFailClass();
+return top == null ? "未完成" : "未完成（主因：" + top + "）";
+}
+
+/** 本任务内最高频 fail_class，无失败返回 null */
+private String topFailClass() {
+String best = null;
+int bestN = 0;
+for (java.util.Map.Entry<String, Integer> e : runFailClass.entrySet()) {
+if (e.getValue() > bestN) {
+bestN = e.getValue();
+best = e.getKey();
+}
+}
+return best;
+}
+
+/** step_env 网络字段：ConnectivityManager 读当前连接态，零网络 I/O */
+private boolean netOk() {
+try {
+android.net.ConnectivityManager cm = (android.net.ConnectivityManager)
+ctx.getSystemService(android.content.Context.CONNECTIVITY_SERVICE);
+android.net.NetworkInfo ni = cm == null ? null : cm.getActiveNetworkInfo();
+return ni != null && ni.isConnected();
+} catch (Exception e) {
+return false;
 }
 }
 }

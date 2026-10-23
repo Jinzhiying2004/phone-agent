@@ -84,6 +84,12 @@ public class SedimentReport {
             if (now - sp.getLong("last_check", 0) < 3600_000) return;
             sp.edit().putLong("last_check", now).apply();
             Telemetry.prune(ctx);
+            // v3.51 步骤5：沉淀前先聚合昨日事件（aggregate-{day}.json，
+            // 报告"病因占比"行直接读聚合，不再数点击）
+            try {
+                Aggregator.writeIfMissing(Telemetry.dir(ctx), Aggregator.yesterday());
+            } catch (Exception ignored) {
+            }
             for (int days : WINDOWS) {
                 long last = sp.getLong("last_gen_" + days, 0);
                 if (now - last < days * 24L * 3600 * 1000) continue;
@@ -211,6 +217,11 @@ public class SedimentReport {
                         .append(t[1] * 100 / t[0]).append("%）");
                 md.append("\n");
             }
+            // v3.51 步骤5：失败归因直接读聚合——"哪类病因占比最高"
+            String failClassLine = topFailClassLine(ctx, days);
+            if (failClassLine != null) {
+                md.append("\n## 病因占比（遥测聚合）\n").append(failClassLine);
+            }
             if (!errCount.isEmpty()) {
                 md.append("\n高频错误：\n");
                 List<Map.Entry<String, Integer>> el = new ArrayList<>(errCount.entrySet());
@@ -246,8 +257,38 @@ public class SedimentReport {
         }
     }
 
-    private static List<JSONObject> readEvents(Context ctx, long since) {
-        List<JSONObject> out = new ArrayList<>();
+    /**
+     * v3.51 步骤5：读范围内最新的 aggregate-*.json，取 fail_class top-1 占比行。
+     * 无聚合文件返回 null（报告降级为不显示该节）。
+     */
+    private static String topFailClassLine(Context ctx, int days) {
+        try {
+            long now = System.currentTimeMillis();
+            java.text.SimpleDateFormat f =
+                    new java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US);
+            for (int d = 0; d < days; d++) {
+                String day = f.format(new java.util.Date(now - d * 24L * 3600 * 1000));
+                JSONObject agg = Aggregator.readAggregate(Telemetry.dir(ctx), day);
+                if (agg == null) continue;
+                JSONObject tool = agg.optJSONObject("tool_result");
+                if (tool == null) continue;
+                int fail = tool.optInt("fail", 0);
+                if (fail == 0) {
+                    return "- 近 " + days + " 天工具调用无失败（" + day + " 聚合）\n";
+                }
+                String top = tool.optString("top_fail_class", "?");
+                JSONObject fc = tool.optJSONObject("fail_class");
+                int topN = (fc != null) ? fc.optInt(top, 0) : 0;
+                int pct = fail > 0 ? topN * 100 / fail : 0;
+                return "- 最高占比病因：" + top + "（" + topN + "/" + fail
+                        + "，" + pct + "%，" + day + " 聚合）\n";
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    private static List<JSONObject> readEvents(Context ctx, long since) {        List<JSONObject> out = new ArrayList<>();
         try {
             File[] fs = Telemetry.dir(ctx).listFiles();
             if (fs == null) return out;

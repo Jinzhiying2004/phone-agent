@@ -66,8 +66,8 @@ public class PhoneTools {
                 req("key", "value"),
                 prop("key", "string", "键"), prop("value", "string", "值")));
         arr.put(fn("vd_start", "开启虚拟屏：后续操作在虚拟屏里进行，不打扰主屏。"
-                + "任务耗时长、或用户可能正在用手机时用；涉及主屏当前状态的任务不要用", new String[0]));
-        arr.put(fn("vd_stop", "关闭虚拟屏，回到主屏操作", new String[0]));
+                + "主显示在任务开始时已锁定，锁定实体屏的任务调用会被拒绝", new String[0]));
+        arr.put(fn("vd_stop", "关闭虚拟屏（主显示锁定为虚拟屏的任务在结束前调用会被拒绝，不能中途切到实体屏）", new String[0]));
         return arr;
     }
 
@@ -95,11 +95,33 @@ public class PhoneTools {
     /** 当前会话通道（AgentLoop 每次任务开始时设置）：vd 仅 app 可用 */
     public static volatile String sessionChannel = "";
 
+    /**
+     * 主显示锁定（2026-10-23 用户亲定主从关系）：AgentLoop 在任务开始时
+     * 按通道与虚拟屏创建结果钉死为 "vd" 或 "main"，任务结束才清。
+     * 锁定后 vd_start/vd_stop 一律拒绝——一个任务不能同时存在于
+     * 虚拟屏和实体屏，中途跨屏会让同一应用在双屏各留一份、点错屏。
+     */
+    public static volatile String sessionDisplayLock = "";
+
     public static Exec execute(Context ctx, TaskRunner runner, String name,
                                String argsJson, boolean vdMode) {
         Exec e = new Exec();
         try {
             if ("vd_start".equals(name)) {
+                // 主从互斥：本任务主显示已锁定为实体屏时，禁止中途另开虚拟屏
+                if ("main".equals(sessionDisplayLock)) {
+                    e.ok = false;
+                    e.text = "本任务主显示已锁定为实体屏，任务结束前不能再开虚拟屏"
+                            + "（一个任务不能同时存在于虚拟屏和实体屏）。"
+                            + "请继续在实体屏完成本任务；需要虚拟屏请另起一个任务。";
+                    return e;
+                }
+                if ("vd".equals(sessionDisplayLock)) {
+                    e.ok = true;
+                    e.text = "本任务主显示已锁定为虚拟屏且正在运行（displayId="
+                            + VirtualDisplayManager.getDisplayId() + "），继续在虚拟屏执行即可。";
+                    return e;
+                }
                 // v3.36：虚拟屏仅 App 通道可用，TG/远控直接在主屏执行
                 if ("tg".equals(sessionChannel) || "remote".equals(sessionChannel)) {
                     e.ok = false;
@@ -134,6 +156,16 @@ public class PhoneTools {
                 return e;
             }
             if ("vd_stop".equals(name)) {
+                // 主从互斥：虚拟屏主显示任务结束前禁止切到实体屏
+                if ("vd".equals(sessionDisplayLock)) {
+                    e.ok = false;
+                    e.text = "本任务主显示已锁定为虚拟屏，任务结束前不能切到实体屏"
+                            + "（一个任务不能同时存在于虚拟屏和实体屏；实体屏右上角"
+                            + "小窗只是实时预览，不承载任务）。请继续在虚拟屏完成"
+                            + "本任务；确需操作实体屏当前状态，请先收尾本任务、"
+                            + "在结论里说明，再另起一个实体屏任务。";
+                    return e;
+                }
                 runner.setVdMode(false);
                 try {
                     VirtualDisplayManager.destroy();

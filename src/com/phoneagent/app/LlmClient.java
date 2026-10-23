@@ -18,6 +18,9 @@ public class LlmClient {
         public boolean ok;
         /** 成功时为模型回复/连接信息，失败时为错误描述 */
         public String text;
+        /** v3.51 步骤5：usage 画像（响应体有 usage 才填，否则 -1） */
+        public long tokIn = -1;
+        public long tokOut = -1;
     }
 
     /** v3.23 原生工具调用返回：纯文本回复 或 tool_calls 数组 */
@@ -28,6 +31,50 @@ public class LlmClient {
         /** 每个元素 {id, name, argsJson}，用 org.json 存 */
         public java.util.List<org.json.JSONObject> calls = new java.util.ArrayList<>();
         public String error;
+        /** v3.51 步骤5：usage 画像（响应体有 usage 才填，否则 -1） */
+        public long tokIn = -1;
+        public long tokOut = -1;
+    }
+
+    // ---------------- v3.51 步骤5：模型调用画像打点 ----------------
+
+    /**
+     * 模型调用画像回调（AgentLoop 安装，打点 model_call 事件；不记 prompt 原文）。
+     * timeout：错误文本含超时特征；retries：本次调用实际尝试次数 - 1。
+     */
+    public interface ModelCallSink {
+        void onCall(String model, long latencyMs, long tokIn, long tokOut,
+                    boolean timeout, int retries);
+    }
+
+    private static volatile ModelCallSink telemetrySink = null;
+
+    public static void setTelemetrySink(ModelCallSink s) { telemetrySink = s; }
+
+    private void reportCall(long t0, long tokIn, long tokOut, String errText, int retries) {
+        ModelCallSink s = telemetrySink;
+        if (s == null) return;
+        boolean timeout = errText != null
+                && (errText.contains("超时")
+                    || errText.toLowerCase().contains("timeout"));
+        try {
+            s.onCall(model, System.currentTimeMillis() - t0,
+                    tokIn, tokOut, timeout, retries);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** 从 /chat/completions 响应体解析 usage（未知时 {-1,-1}） */
+    private static long[] parseUsage(String body) {
+        try {
+            org.json.JSONObject root = new org.json.JSONObject(body);
+            org.json.JSONObject u = root.optJSONObject("usage");
+            if (u == null) return new long[]{-1, -1};
+            return new long[]{u.optLong("prompt_tokens", -1),
+                    u.optLong("completion_tokens", -1)};
+        } catch (Exception e) {
+            return new long[]{-1, -1};
+        }
     }
 
     /**
@@ -35,7 +82,18 @@ public class LlmClient {
      * {"role":"system"/"user"/"assistant"/"tool","content":"...","tool_call_id":"..."(tool时),"tool_calls":[...](assistant时),"image_b64":"..."(user附图时)}
      * tools 为 OpenAI function schemas JSONArray。
      */
+    /**
+     * v3.51 步骤5：chatTools 打点包装——模型画像（延迟/token/超时/重试）经 sink 上报，
+     * 不记 prompt 原文。原实现下沉为 doChatTools，调用方签名不变。
+     */
     public ToolReply chatTools(org.json.JSONArray messages, org.json.JSONArray tools) {
+        long t0 = System.currentTimeMillis();
+        ToolReply tr = doChatTools(messages, tools);
+        reportCall(t0, tr.tokIn, tr.tokOut, tr.ok ? null : tr.error, 0);
+        return tr;
+    }
+
+    private ToolReply doChatTools(org.json.JSONArray messages, org.json.JSONArray tools) {
         ToolReply tr = new ToolReply();
         try {
             // 组装 payload
@@ -112,6 +170,10 @@ public class LlmClient {
                 }
             }
             tr.ok = true;
+            // v3.51 步骤5：usage 画像（响应体有 usage 才填）
+            long[] uu = parseUsage(body);
+            tr.tokIn = uu[0];
+            tr.tokOut = uu[1];
             return tr;
         } catch (Exception e) {
             tr.ok = false;
@@ -187,7 +249,12 @@ public class LlmClient {
      * v2.51 借鉴 ApkClaw：失败指数退避重试（1s→2s→4s），401/403 不重试。
      */
     public Result chat(String prompt) {
-        return withRetry(() -> doChat(prompt));
+        // v3.51 步骤5：打点包装——模型画像经 sink 上报，不记 prompt 原文
+        long t0 = System.currentTimeMillis();
+        int[] att = new int[1];
+        Result r = withRetry(() -> doChat(prompt), att);
+        reportCall(t0, r.tokIn, r.tokOut, r.ok ? null : r.text, att[0]);
+        return r;
     }
 
     /** 流式回调：收到 token 片段时调用 */
@@ -200,6 +267,14 @@ public class LlmClient {
      * 每个 token 到达时调 onToken，全收完返回完整 Result。
      */
     public Result chatStream(String prompt, StreamCallback cb) {
+        // v3.51 步骤5：打点包装（SSE 无 usage，tok=-1）
+        long t0 = System.currentTimeMillis();
+        Result r = doChatStream(prompt, cb);
+        reportCall(t0, r.tokIn, r.tokOut, r.ok ? null : r.text, 0);
+        return r;
+    }
+
+    private Result doChatStream(String prompt, StreamCallback cb) {
         Result r = new Result();
         StringBuilder full = new StringBuilder();
         try {
@@ -259,11 +334,12 @@ public class LlmClient {
         return r;
     }
 
-    private Result withRetry(java.util.function.Supplier<Result> call) {
+    private Result withRetry(java.util.function.Supplier<Result> call, int[] attemptsOut) {
         Result r = null;
         long[] waits = {1000, 2000, 4000};
         for (int i = 0; i <= waits.length; i++) {
             r = call.get();
+            if (attemptsOut != null) attemptsOut[0] = i; // v3.51 步骤5：记录实际尝试轮次
             if (r.ok) return r;
             // key 错了重试没用，直接返回
             if (r.text != null && (r.text.contains("HTTP 401") || r.text.contains("HTTP 403"))) {
@@ -296,6 +372,10 @@ public class LlmClient {
                 if (content != null) {
                     r.ok = true;
                     r.text = content;
+                    // v3.51 步骤5：usage 画像
+                    long[] uu = parseUsage(body);
+                    r.tokIn = uu[0];
+                    r.tokOut = uu[1];
                 } else {
                     r.ok = false;
                     r.text = "解析回复失败";
@@ -317,7 +397,12 @@ public class LlmClient {
      */
     public Result chatVision(String prompt, android.graphics.Bitmap image,
                              String visionModel) {
-        return withRetry(() -> doChatVision(prompt, image, visionModel));
+        // v3.51 步骤5：打点包装
+        long t0 = System.currentTimeMillis();
+        int[] att = new int[1];
+        Result r = withRetry(() -> doChatVision(prompt, image, visionModel), att);
+        reportCall(t0, r.tokIn, r.tokOut, r.ok ? null : r.text, att[0]);
+        return r;
     }
 
     private Result doChatVision(String prompt, android.graphics.Bitmap image,
@@ -358,6 +443,10 @@ public class LlmClient {
                 if (content != null) {
                     r.ok = true;
                     r.text = content;
+                    // v3.51 步骤5：usage 画像
+                    long[] uu = parseUsage(body);
+                    r.tokIn = uu[0];
+                    r.tokOut = uu[1];
                 } else {
                     r.ok = false;
                     r.text = "解析回复失败";

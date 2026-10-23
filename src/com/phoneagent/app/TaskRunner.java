@@ -40,6 +40,40 @@ public class TaskRunner {
     // v3.14：虚拟屏模式——主屏动作透明路由到 vd_*，用户主屏不受打扰
     private boolean vdMode = false;
 
+    // 记忆分层步骤 4：认知库（图标词典注入用），由 AgentLoop.setCognitionStore 传入
+    private CognitionStore cogStore = null;
+    public void setCognitionStore(CognitionStore c) { cogStore = c; }
+
+    // 前台包名缓存（10s TTL；取不到时返回空串，只出通用图标义）
+    private long fgPkgTs = 0;
+    private String fgPkgCache = "";
+    /** v3.51 步骤5：遥测 step_env 的 fg_app 字段——复用 10s TTL 缓存，零额外开销 */
+    public String fgPackage() { return foregroundPkgCached(); }
+    private String foregroundPkgCached() {
+        long now = System.currentTimeMillis();
+        if (fgPkgTs > 0 && now - fgPkgTs < 10000) return fgPkgCache;
+        fgPkgTs = now;
+        String p = "";
+        try {
+            if (Root.findSu() != null) {
+                String[] r = RootShell.get().exec(
+                        "dumpsys activity activities | grep -m 1 mResumedActivity", 3);
+                if (r != null && r.length > 1 && r[1] != null) {
+                    String out = r[1];
+                    int u = out.indexOf("u0 ");
+                    if (u >= 0) {
+                        int a = u + 3;
+                        int b = out.indexOf('/', a);
+                        if (b > a) p = out.substring(a, b).trim();
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        fgPkgCache = p;
+        return p;
+    }
+
     public TaskRunner(Context ctx, Listener listener) {
         this.ctx = ctx.getApplicationContext();
         this.listener = listener;
@@ -242,6 +276,14 @@ public class TaskRunner {
         // v3.21：统一要求归一化坐标，避免像素估算偏差
         String q = question + "\n\n（如需回答位置，请用 0-1000 归一化坐标，"
                 + "左上角为原点；不要估算像素值。）";
+        // 记忆分层步骤 4：图标词典注入（通用义 + 前台 App 界面地图覆盖）
+        try {
+            if (cogStore != null) {
+                String ib = cogStore.iconBlock(foregroundPkgCached());
+                if (!ib.isEmpty()) q = q + "\n\n" + ib;
+            }
+        } catch (Exception ignored) {
+        }
         // 1) 辅助视觉模型
         try {
             AuxModelStore aux = new AuxModelStore(ctx);

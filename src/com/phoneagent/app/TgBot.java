@@ -45,6 +45,9 @@ public class TgBot {
     private volatile boolean tgTaskRunning = false;
     // v2.98：流式推送节流
     private long tgLastPushMs = 0;
+    // v3.56 记忆分层·步骤7：TG 会话边界——/new 之外，连续 30 分钟无消息也开新会话
+    private long tgLastMsgMs = 0;
+    private static final long TG_IDLE_NEW_SESSION_MS = 30L * 60 * 1000;
     // v3.38：TG 最近对话（给 agent 补上下文，帮它理解指代与真实意图）
     private Thread thread;
     private long offset = 0;
@@ -161,6 +164,19 @@ public class TgBot {
             return; // 未绑定时其他消息一律忽略
         }
         if (chatId != store.getOwner()) return; // 陌生人忽略
+
+        // v3.56 记忆分层·步骤7：连续 30 分钟无消息视为新会话——
+        // 清共享轮次（长期认知库不动），等价于一次自动 /new
+        long nowMs = System.currentTimeMillis();
+        if (tgLastMsgMs != 0 && nowMs - tgLastMsgMs > TG_IDLE_NEW_SESSION_MS) {
+            try {
+                new ChatStore(ctx).newSession();
+                SharedMemory.clear(ctx);
+            } catch (Exception ignored) {
+            }
+            log("TG 30 分钟无消息，自动开新会话（共享上下文已清空）");
+        }
+        tgLastMsgMs = nowMs;
 
         // v3.50 第 3 步：澄清接龙——有待澄清时，下一条非指令文本即视为澄清回答；
         // 任何 "/" 指令都先清掉待澄清（/new、/stop 等已有清理语义兜底）
@@ -347,7 +363,12 @@ public class TgBot {
                     LocalIntentRouter.tryRoute(ctx, goal);
             if (rr != null) {
                 sendMessage(chatId, (rr.handled ? "✅ " : "⚠️ ") + rr.message);
-                if (rr.handled) return;
+                if (rr.handled) {
+                    // v3.51 步骤5：本地路由决策点打点（零 token 直达）
+                    Telemetry.decisionPoint(ctx, "tg", "local_route", 1.0,
+                            goal, "local_route", 1.0, null);
+                    return;
+                }
             } else {
                 try {
                     org.json.JSONObject rd = new org.json.JSONObject();

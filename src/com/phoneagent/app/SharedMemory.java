@@ -24,10 +24,12 @@ import java.util.Set;
 * cognition.json（CognitionStore）。经验队列每次任务结局入队后就地走
 * Distiller 规则蒸馏（零 token）：蒸馏出的候选进 cognition.json draft
 *（votes>=2 转正），蒸馏不出的直接丢弃。任务流水禁止入库。
-* 会话边界（三端独立，各人格短期不互串；长期认知三端共享）——步骤7 接线：
+* 会话边界（三端独立，各人格短期不互串；长期认知三端共享）——步骤7 已接线（v3.56）：
 * App：MainActivity 新会话入口或显式 /new -> clear()；
 * TG：/new 或连续 30 分钟无消息 -> clear()；
 * 远控：每次任务结束且客户端断开 -> clear()。
+* （v3.56 落地：TG 加 30 分钟无消息自动新会话；远控 goal 任务结束清，待澄清不清；
+* App 的 /clear 与新对话按钮此前已接。）
 */
 public class SharedMemory {
 

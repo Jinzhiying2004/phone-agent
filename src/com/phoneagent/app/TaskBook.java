@@ -121,7 +121,8 @@ public class TaskBook {
                 .append("\"「再看N个提前得明日/提前享」是目标外链条，出现即拒绝并收尾\"。\n");
         sb.append("3. confidence 标尺：对象明确且可达 ≥0.7；对象多义/指代不明 ≤0.4")
                 .append(" 并在 doubt 写清卡在哪；options 在 confidence<0.4 时必填 2~4 个选项。\n");
-        sb.append("4. forbidden 默认至少含\"不许做与目标无关的充值/订阅\"。");
+sb.append("4. forbidden 默认至少含\"不许做与目标无关的充值/订阅\"。");
+        sb.append("5. 判据如含状态查询分支（如状态/开关/是否）：把状态证据类判据写在最前面。\n");
         return sb.toString();
     }
 
@@ -221,6 +222,7 @@ public class TaskBook {
         sb.append("对象：").append(target.isEmpty() ? "（未定）" : target)
                 .append("｜动作：").append(action.isEmpty() ? "（未定）" : action).append("\n");
         sb.append("完成判据：").append(trim(criteria.isEmpty() ? "（未定）" : criteria, MAX_CRITERIA)).append("\n");
+if (hasStateBranch(criteria)) sb.append("⚡状态证据优先：判据含状态查询——状态证据满足即可收尾，不必走完 GUI 路径\n");
         if (!stopLines.isEmpty()) {
             sb.append("停止线：");
             for (int i = 0; i < stopLines.size(); i++) {
@@ -322,7 +324,34 @@ public class TaskBook {
         return checkStop(screenText, null);
     }
 
-    // ---------------- 工具 ----------------
+    // ---------------- 步骤6：状态证据优先 + 判据分支收尾提醒 ----------------
+/** 判据是否含"状态查询"分支：状态/开关/是否/答案类证据满足即可收尾 */
+static boolean hasStateBranch(String criteria) {
+return containsAny(criteria, "状态", "开关", "是否", "答案");
+}
+/** 判据按 或/； 切成分支，再取每个分支的可字面匹配关键词 */
+public List<String> criteriaBranches() {
+List<String> out = new ArrayList<>();
+if (criteria == null) return out;
+for (String part : criteria.split("或|；|\\||\\n")) {
+for (String cand : signalCandidates(part)) {
+if (cand.length() >= 2 && !out.contains(cand)) out.add(cand);
+}
+}
+return out;
+}
+/**
+* 判据分支证据命中：某分支关键词命中最近工具观察文本时返回该分支，否则 null。
+* 零 token 纯字符串检查（供 AgentLoop 每轮收尾提醒）。
+*/
+public String branchHit(String roundObs) {
+if (roundObs == null || roundObs.isEmpty()) return null;
+for (String b : criteriaBranches()) {
+if (roundObs.contains(b)) return b;
+}
+return null;
+}
+// ---------------- 工具 ----------------
 
     private static double clamp01(double v) {
         if (v < 0) return 0;

@@ -51,6 +51,24 @@ public class CognitionStore {
     public static final String STATUS_ACTIVE = "active";
     public static final String STATUS_DRAFT = "draft";
 
+    /** 图标词典通用符号种子（kind=icon_word）。text 格式 "图标名=含义" */
+    public static final String[] ICON_SEEDS = {
+        "放大镜=搜索",
+        "三横线（汉堡菜单）=菜单或更多选项",
+        "齿轮=设置",
+        "漏斗=筛选或过滤",
+        "铃铛=通知或消息",
+        "纸飞机=发送",
+        "回形针=附件",
+        "加号=新增或添加",
+        "叉号=关闭",
+        "左箭头=返回上一页",
+        "三点=更多操作",
+        "星星=收藏",
+        "心形=喜欢或点赞",
+        "分享箭头=分享",
+    };
+
     public static class Item {
         public String id = "";
         public String kind = "";
@@ -344,6 +362,115 @@ public class CognitionStore {
             }
         }
         return n;
+    }
+
+    /**
+     * 图标词典种子幂等导入（步骤 4 接线：任务入口调用）。
+     * 通用符号语义转 icon_word 条目（src=user_seed，直接 active）；
+     * 已存在同 key 条目时跳过（不重复、不覆盖用户改过的内容）。
+     * 返回新增条目数。
+     */
+    public synchronized int importIconSeeds() {
+        int n = 0;
+        for (String seed : ICON_SEEDS) {
+            String key = keyOf(seed);
+            if (key.isEmpty()) continue;
+            boolean exists = false;
+            for (Item it : items) {
+                if (KIND_ICON_WORD.equals(it.kind)
+                        && key.equals(keyOf(it.text))) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) {
+                put(KIND_ICON_WORD, seed, SRC_USER_SEED, "");
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /**
+     * 界面地图写入/覆盖 API（步骤 4；探索规程的自动触发落后续版本）。
+     * 按 (pkg, key) 幂等：key 取 text 在 '=' 或 '：' 之前的部分，
+     * 都没有时取前 16 字；命中则覆盖 text 并刷新 ts，否则新增。
+     * 同一 key 多次探索只保留最新版。返回条目 id。
+     */
+    public synchronized String putUiMap(String pkg, String text) {
+        if (pkg == null || pkg.trim().isEmpty()
+                || text == null || text.trim().isEmpty()) return "";
+        String key = keyOfUi(text);
+        for (Item it : items) {
+            if (KIND_UI_MAP.equals(it.kind) && pkg.equals(it.pkg)
+                    && key.equals(keyOfUi(it.text))) {
+                it.text = text.trim();
+                it.ts = System.currentTimeMillis();
+                if (STATUS_DRAFT.equals(it.status)) it.status = STATUS_ACTIVE;
+                return it.id;
+            }
+        }
+        // 探索写入是经画面变化验证过的观察结论（错了下次探索覆盖修正），
+        // 直接 active；不确定的蒸馏候选才走 draft/votes 转正。
+        String id = put(KIND_UI_MAP, text.trim(), SRC_TASK_DISTILL, pkg.trim());
+        Item created = find(id);
+        if (created != null) created.status = STATUS_ACTIVE;
+        return id;
+    }
+
+    /** ui_map 条目的 key：'=' 或 '：' 之前；都没有时取前 16 字 */
+    private static String keyOfUi(String text) {
+        if (text == null) return "";
+        String t = text.trim();
+        int i = t.indexOf('=');
+        int j = t.indexOf('：');
+        int k = i < 0 ? j : (j < 0 ? i : Math.min(i, j));
+        if (k > 0) return t.substring(0, k).trim();
+        return t.length() > 16 ? t.substring(0, 16) : t;
+    }
+
+    /**
+     * 图标词典注入块（步骤 4 接线：视觉提示词组装处 + 规划提示词）。
+     * 内容 = active 的 icon_word 通用义 + 该包 ui_map；
+     * 同包名同图标名下 ui_map 覆盖通用义（该图标的通用行被丢弃，
+     * 以地图文本为准）。pkg 为空时只出通用义。
+     * 无条目时返回空串，调用方直接跳过拼接。
+     */
+    public synchronized String iconBlock(String pkg) {
+        List<Item> maps = (pkg == null || pkg.isEmpty())
+                ? new ArrayList<Item>() : uiMap(pkg);
+        StringBuilder gen = new StringBuilder();
+        for (Item it : items) {
+            if (!STATUS_ACTIVE.equals(it.status)
+                    || !KIND_ICON_WORD.equals(it.kind)) continue;
+            String key = keyOf(it.text);
+            boolean overridden = false;
+            if (!key.isEmpty()) {
+                for (Item m : maps) {
+                    if (m.text != null && m.text.contains(key)) {
+                        overridden = true;
+                        break;
+                    }
+                }
+            }
+            if (overridden) continue;
+            if (gen.length() > 0) gen.append("；");
+            gen.append(it.text);
+        }
+        StringBuilder sb = new StringBuilder();
+        if (gen.length() > 0) {
+            sb.append("[图标词典] 以下常见图标的通常含义"
+                    + "（定位纯图标按钮时参考）：").append(gen);
+        }
+        if (!maps.isEmpty()) {
+            if (sb.length() > 0) sb.append("\n");
+            sb.append("[界面地图 ").append(pkg).append("]"
+                    + "（该 App 的特殊含义，以地图为准）：");
+            for (Item m : maps) {
+                sb.append("\n- ").append(trim(m.text, 120));
+            }
+        }
+        return sb.toString();
     }
 
     /** user_dict 文本 "k=v" 的 key 部分（= 前）；无 = 时取全文 */
