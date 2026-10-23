@@ -1,5 +1,20 @@
 # 更新日志
 
+## v3.61（2026-10-24）
+学习梯子第 3 级打磨（搜索研讨第 4 轮 R21/R22/R24 落地）：①提问时机纪律（R21）——只问下一步动作真需要的空位、不提前问后续步骤、多个空位从上到下一次问一个，补进 ladderPrompt 与 ask_user 工具 schema 说明；②问前设备上下文消解（R24）——问之前先过一遍设备已有信息（日历/联系人/通知/词典/界面地图/当前屏面），能自己定高置信的直接定不问（梯子第 1 级加厚）；③提问三态分流（R22）——ask_user 只问信息缺失类问题，敏感动作的"行不行"不走它，直接调对应工具走风险确认通道（App 会弹确认，远控/TG 无审批人时自动拦截），明确做不到的直接收尾不问用户。共享层一处生效（App/TG/远控）。只构建不装机。
+
+## v3.60（2026-10-24）
+学习梯子步骤2（TG 同步提问）：①新增 AskGate 纯 Java 挂起/投递门（register/deliver/cancel/unregister，CountDownLatch 跨线程唤醒，JVM 单测 20/20）；②TgBot.askUserSync——TG 通道 ask_user 任务线程挂起等主人下条回复（120s 超时），轮询线程继续收消息，回答解析上移共享与澄清接龙共用；③/task 移到工作线程并入 TaskLock 互斥（防轮询线程阻塞死锁），/stop 联动停 TaskRunner；④远控 HTTP 通道保持结论降级（无聊天回路）。只构建不装机。
+
+## v3.59（2026-10-23）
+技能卡生命周期收官（步骤3-4，随本版整包）：①调卡失败接线——TaskRunner use_card 结局自动落账 recordUse（草稿调卡成功一次转正、失败打回草稿记修卡原因），同 App 新卡按 appPkg 判重、同 App 失败时修卡说明附界面地图片段；②修卡工具——工具注册表新增 repair_card，就地修卡：快照旧版本进版本历史（每卡上限 20）→更新内容→version 单调递增→打回草稿待复验，另支持 rollback 回滚（同样走草稿复验）；sessionSystemPrompt 增修卡规程四步（复现失败→定位原因→就地修卡→调卡复验）；③全链验收——JVM 单测 19/19（改坏卡→失败打回草稿记原因→修卡快照→version=2→复验转正→二次失败可重复打回→版本历史上限→null 保护）。三端共享 SkillCardStore/TaskRunner，一处生效。只构建不装机。
+
+## v3.58（2026-10-23）
+底部 tab 图标简化+技能卡生命周期第一阶段（步骤1-2）：①底部 tab 图标换代——五个 emoji 图标（主页/远控/智能体/终端/我的）全部换成单色细线条矢量图标，新增 TabIconView 代码绘制（24 单位网格、统一 1.7 线宽、圆头线帽）：房屋轮廓、广播波纹、四角星闪光、终端折线加短横、人像轮廓；选中态为主色胶囊底加白色图标，未选中中性灰；无图片资源、任意分辨率不糊；②技能卡生命周期（步骤1-2）——卡片加状态/版本/验证计数/修卡原因/所属应用字段与版本历史（每卡上限 20 版、可回滚），草稿卡调卡成功转正、失败打回草稿记原因；成功轨迹自动沉淀草稿卡（蒸馏队列同类候选攒够 2 票才消费、30 天过期清理、同类卡判重防滚雪球）。只构建不装机。
+
+## v3.57（2026-10-23）
+本地编程能力（SPEC 学习闭环后 v3.53 阶段·步骤1-7归一）：①风险分级——ActionRisk 新增 read_file_root（HIGH）/write_file_root（HIGH）/edit_file（CRITICAL），PhoneTools edit_file schema（old/new/occurrence）进 toolToStep 白名单；②TaskRunner root 文件读写通道——read_file/write_file 走 root 提权，禁用裸 cat（无尾换行时 marker 粘连必超时），读走 base64;echo 管线云端解码、写走 printf|base64 -d 落盘（单引号路径转义）；③edit_file 片段编辑——空 old/old==new 提前拒绝、occurrence 指定第 n 处替换、找不到时给 10 行候选行（首行行号），allowAdvanced 门控；④BootstrapManager.ensureRuntime——Termux 首启后台装 python+git（10 分钟超时）、python3 -V && git --version 验执行链、install 完成自动触发、termux 调用点未就绪懒触发并返回明确恢复指引；⑤提示词三处——termux/read_file/write_file schema 描述改写（脚本优先/找配置优先/root 提权说明）、sessionSystemPrompt 追加「编程优先」块（先找配置数据文件、能写脚本别手点、改完查状态验证）、TaskBook 任务类型先验加「改造类（含改/修/配置软件）」+动作先验「文件/脚本优先」；⑥FileEditKit 纯类（无 Android 依赖）——isInAppDomain（canonical 化+「/」边界防前缀攻击）、applyEdit、editHints、shQuote/findNth/md5Hex 整体搬迁，TaskRunner 改委托、行为不变。只构建不装机。
+
 ## v3.56（2026-10-23）
 记忆分层收官（设计稿 v351 步骤4–7，随本版整包出）：①图标词典注入+ui_map 读写 API——每 App 建界面地图与图标词典，视觉工具与规划提示词两处同源注入；②遥测改造——原始事件保留期 30 天→7 天、新增 aggregate-* 聚合（保留 30 天），五类事件（决策点/工具结果/模型画像/监管裁决/步环境）+失败病因自动分类（坐标偏/元素缺失/页面未就绪/权限/超时），沉淀报告新增「病因占比」节；③TaskBook 状态证据优先——判据含状态/开关/是否/答案分支时钉住块附注「状态证据满足即可收尾，不必走完 GUI 路径」，AgentLoop 加判据分支软收尾提醒（每分支只提醒一次、不截停）；④三端会话边界接线——TG 连续 30 分钟无消息自动开新会话（等价自动 /new，清共享轮次、长期认知不动）；远控 goal 任务结束清共享轮次（待澄清时不清，等澄清跟进的 /task 接着读上下文）；App 的 /clear 与新对话按钮此前已接线。
 

@@ -65,6 +65,14 @@ public class TgBot {
     }
     private final java.util.Map<Long, ClarifyPending> pendingClarify =
             new java.util.concurrent.ConcurrentHashMap<>();
+    // 学习梯子步骤2：当前运行中的 Bot 实例（TaskRunner 的 ask_user 同步提问用）。
+    // 只在 start()/stop() 里赋值，任务线程只读。
+    private static volatile TgBot currentInstance = null;
+
+    /** 返回当前运行中的 TgBot，没有运行返回 null。 */
+    public static TgBot current() {
+        return currentInstance;
+    }
 
     public TgBot(Context ctx, TgStore store, LlmStore llmStore, Listener listener) {
         this.ctx = ctx.getApplicationContext();
@@ -84,6 +92,7 @@ public class TgBot {
             return;
         }
         running = true;
+        currentInstance = this;
         thread = new Thread(this::loop, "tgbot");
         thread.start();
         log("Telegram Bot 已启动，等待指令…");
@@ -91,6 +100,7 @@ public class TgBot {
 
     public synchronized void stop() {
         running = false;
+        if (currentInstance == this) currentInstance = null;
         if (thread != null) thread.interrupt();
         log("Telegram Bot 已停止");
     }
@@ -178,6 +188,17 @@ public class TgBot {
         }
         tgLastMsgMs = nowMs;
 
+        // 学习梯子步骤2：同步提问挂起中——下一条非指令文本即投递为回答；
+        // 任何 "/" 指令都打断等待（唤醒任务线程），再走正常指令流程
+        if (AskGate.hasPending(chatId)) {
+            if (!text.startsWith("/")) {
+                AskGate.deliver(chatId, text);
+                log("❓ TG 提问回答已投递");
+                return;
+            }
+            AskGate.cancel(chatId);
+            log("❓ TG 提问被指令打断");
+        }
         // v3.50 第 3 步：澄清接龙——有待澄清时，下一条非指令文本即视为澄清回答；
         // 任何 "/" 指令都先清掉待澄清（/new、/stop 等已有清理语义兜底）
         if (!text.startsWith("/")) {
@@ -228,6 +249,12 @@ public class TgBot {
                     sendMessage(chatId, "已在停止中…");
                 } else {
                     tgTaskStop = true;
+                    // 学习梯子步骤2：/task 也可能在工作线程跑（同步提问挂起中），
+                    // 直接停掉它的 TaskRunner
+                    try {
+                        if (tgTaskRunner != null) tgTaskRunner.stop();
+                    } catch (Exception ignored) {
+                    }
                     sendMessage(chatId, "🛑 已请求停止，正在打断…");
                 }
             } else if (text.startsWith("/task")) {
@@ -275,7 +302,25 @@ public class TgBot {
             sendMessage(chatId, "用法：/task {\"steps\":[...]}");
             return;
         }
-        sendMessage(chatId, "▶ 开始执行任务…");
+        // 学习梯子步骤2：/task 移到工作线程——ask_user 同步提问要挂起等回复，
+        // 轮询线程一旦阻塞，回复永远收不进来（死锁）。/agent 在 v3.32 已同理迁移。
+        // v3.32 同理：三通道真互斥，/task 也走 TaskLock
+        if (!TaskLock.tryAcquire("tg")) {
+            sendMessage(chatId, "⏳ 任务忙：" + TaskLock.current()
+                    + " 通道正在执行，请稍后再试");
+            return;
+        }
+        tgTaskStop = false;
+        tgTaskRunning = true;
+        sendMessage(chatId, "▶ 开始执行任务…", replyTo);
+        new Thread(() -> runTaskJson(chatId, json, replyTo), "tg-task").start();
+    }
+
+    // 当前在工作线程跑的 /task runner（/stop 联动用）
+    private volatile TaskRunner tgTaskRunner = null;
+
+    /** /task 真正的执行体（跑在 tg-task 工作线程） */
+    private void runTaskJson(long chatId, String json, long replyTo) {
         StringBuilder logs = new StringBuilder();
         TaskRunner runner = new TaskRunner(ctx, s -> {
             logs.append(s).append("\n");
@@ -283,13 +328,22 @@ public class TgBot {
         });
         // 远程任务：ASK 策略的高风险动作无审批人时拦截
         runner.setRemote(true);
+        // 学习梯子步骤2：TG 通道标识——ask_user 走同步提问而非结论降级
+        runner.setChannel("tg");
+        tgTaskRunner = runner;
         boolean ok;
         try {
             ok = runner.run(json);
         } catch (Exception e) {
             sendMessage(chatId, "任务解析失败：" + e.getMessage(), replyTo);
+            tgTaskRunning = false;
+            tgTaskRunner = null;
+            TaskLock.release("tg");
             return;
         }
+        tgTaskRunning = false;
+        tgTaskRunner = null;
+        TaskLock.release("tg");
         sendMessage(chatId, (ok ? "✅ 任务完成\n\n" : "⏹ 任务结束（未完成）\n\n")
                 + trimLog(logs.toString()), replyTo);
     }
@@ -322,27 +376,51 @@ public class TgBot {
      */
     private String parseClarifyAnswer(String text,
                                       java.util.List<String> options) {
-        String t = text == null ? "" : text.trim();
-        int idx = -1;
-        if (t.matches("[1-4]")) {
-            idx = t.charAt(0) - '1';
-        } else if (!t.isEmpty()) {
-            int p = "①②③④".indexOf(t.charAt(0));
-            if (p >= 0) idx = p;
-        }
-        if (idx >= 0 && options != null && idx < options.size()) {
-            return options.get(idx);
-        }
-        if (options != null) {
-            for (String o : options) {
-                if (o == null || o.isEmpty()) continue;
-                if (o.equals(t)) return o;
-                if (t.length() >= 2 && (t.contains(o) || o.contains(t))) {
-                    return o;
-                }
+        // 学习梯子步骤2：解析逻辑上移到 AskGate.parseAnswer，三处共用
+        //（澄清接龙 / 同步提问），此处只保留兼容壳
+        return AskGate.parseAnswer(text, options);
+    }
+
+    /** 主人 chatId（TaskRunner 的 ask_user 同步提问要知道发给谁）。 */
+    public long getOwnerChatId() {
+        return store.getOwner();
+    }
+
+    /**
+     * 学习梯子步骤2：TG 通道任务内同步提问。
+     * 发出选项式问题后阻塞当前线程，等主人下一条回复或超时。
+     * 返回：解析后的用户回答；超时返回 null；被新指令打断返回 ""。
+     * 必须在任务线程（如 tg-agent/tg-task）调用，禁止在轮询线程调用。
+     */
+    public String askUserSync(long chatId, String payload,
+            java.util.List<String> options, long timeoutMs) {
+        if (chatId == 0) return null;
+        AskGate.Pending p = AskGate.register(chatId, options);
+        try {
+            String q = "❓ 需要确认一下\n" + payload
+                    + "\n（回复序号或选项即可；换话题发 /new）";
+            sendMessage(chatId, q);
+            log("[ask] TG 提问已发送，等待用户回复（"
+                    + (timeoutMs / 1000) + "s）");
+            boolean ok = p.latch.await(timeoutMs,
+                    java.util.concurrent.TimeUnit.MILLISECONDS);
+            if (!ok) {
+                log("[ask] TG 提问超时");
+                return null;
             }
+            if (p.cancelled) {
+                log("[ask] TG 提问被新指令打断");
+                return "";
+            }
+            String ans = AskGate.parseAnswer(p.rawAnswer, options);
+            log("[ask] TG 用户回答：" + ans);
+            return ans == null ? "" : ans;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        } finally {
+            AskGate.unregister(chatId, p);
         }
-        return t;
     }
 
     private void runAgentCmd(long chatId, String goal) {

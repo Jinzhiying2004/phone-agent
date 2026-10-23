@@ -48,6 +48,14 @@ public class PhoneTools {
                 prop("timeout", "integer", "超时秒，默认10")));
         arr.put(fn("use_card", "调用已保存的技能卡",
                 req("id"), prop("id", "string", "技能卡id")));
+        // v3.59 步骤4：就地修卡——use_card 失败后先对地图、再修卡（修卡走草稿→复验→转正）。
+        arr.put(fn("repair_card", "就地修卡：调卡(use_card)失败后用它修卡；只传 id 即读取该卡当前内容与失败记录（不改卡），传 content+note 即修卡（旧版本自动快照、可回滚，修后打回草稿、复验成功一次自动转正）",
+                req("id"), prop("id", "string", "技能卡id"),
+                prop("content", "string", "修好的卡片内容全文；留空=只读当前内容与失败记录"),
+                prop("note", "string", "修卡原因/病因（如哪一步失效、因何失效）"),
+                prop("name", "string", "可选：新卡名，留空不变"),
+                prop("trigger", "string", "可选：新触发语，留空不变"),
+                prop("summary", "string", "可选：新摘要，留空不变")));
         arr.put(fn("termux", "内置 Termux（bash/python3/git）：能写脚本解决的优先写脚本，"
                 + "不要手点界面；改软件先找它的配置文件/数据文件（用 read_file 读），"
                 + "改完用脚本验证状态",
@@ -57,6 +65,16 @@ public class PhoneTools {
         arr.put(fn("search", "联网搜索",
                 req("query"), prop("query", "string", "搜索词"),
                 prop("count", "integer", "结果数，默认5")));
+        // 学习梯子步骤1：第 3 级——两轮搜完无果时问用户一句（选项式）。
+        // App 通道弹全局悬浮窗选项（120 秒超时）；TG/远控通道转结论内提问。
+        arr.put(fn("ask_user", "问用户一句（选项式）：学习梯子第 3 级，"
+                + "两轮搜索无果后用它向用户求助；用户选完按选择继续；"
+                + "时机：只问下一步动作真需要的空位，不提前问后续步骤，多空位一次问一个；"
+                + "问前先查设备已有信息（日历/联系人/通知/词典/当前屏面），能自己定的不问；"
+                + "敏感动作的\"行不行\"不走它，直接调对应工具走风险确认通道",
+                req("question"), prop("question", "string", "要问用户的问题"),
+                prop("options", "string", "候选选项（JSON 数组字符串，如[\"自动选择\",\"日本\"]；不填=开放式提问）"),
+                prop("hint", "string", "可选：给用户的补充说明（如已试过的方法）")));
         arr.put(fn("read_file", "读文件（本软件私有目录之外自动 root 提权读，"
                 + "如其他 App 的 /data/data；找配置优先用它）",
                 req("path"), prop("path", "string", "路径")));
@@ -93,7 +111,7 @@ public class PhoneTools {
             for (String k : new String[]{"text", "x", "y", "question", "from", "to",
                     "package", "s", "timeout", "id", "cmd", "query", "count",
                     "path", "content", "url", "key", "value",
-                    "old", "new", "occurrence"}) {
+                    "old", "new", "occurrence", "options", "hint"}) {
                 if (args.has(k)) step.put(k, args.get(k));
             }
             return step.toString();

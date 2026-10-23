@@ -34,11 +34,18 @@ public class TaskRunner {
     private String lastOutput = "";
     private Approver approver = null;
     private boolean remote = false;
+    // 学习梯子步骤2：任务通道（见 setChannel）
+    private String channel = "";
     private ActionRisk.Policy riskPolicy = null;
     // v3.10 Issue 4：远程高危动作策略（deny=一律拒绝，allow_log=允许但记录）
     private String remoteRiskPolicy = "deny";
     // v3.14：虚拟屏模式——主屏动作透明路由到 vd_*，用户主屏不受打扰
     private boolean vdMode = false;
+
+    // 学习梯子步骤1：每任务独立的爬梯记账（联网搜索 2 轮硬上限 + 问用户状态）
+    // TaskRunner 按任务构造（AgentLoop/TgBot/ApiHandler 每次任务 new 一个），
+    // 故实例字段即等于每任务预算。
+    private final LearningLadder ladder = new LearningLadder();
 
     // 记忆分层步骤 4：认知库（图标词典注入用），由 AgentLoop.setCognitionStore 传入
     private CognitionStore cogStore = null;
@@ -88,6 +95,17 @@ public class TaskRunner {
     /** 标记是否为远程（HTTP / Telegram）进来的任务：无审批人时 ASK 策略直接拦截 */
     public void setRemote(boolean remote) {
         this.remote = remote;
+    }
+
+    /**
+     * 学习梯子步骤2：设置任务通道（app/tg/remote）。
+     * ask_user 按通道选提问方式：app 走悬浮窗，tg 走同步提问，
+     * remote（HTTP 远控）无聊天回路只能结论降级。
+     * AgentLoop 会同步 PhoneTools.sessionChannel；直接 new TaskRunner 的
+     * 路径（如 TgBot /task）由调用方显式 setChannel。
+     */
+    public void setChannel(String ch) {
+        this.channel = ch == null ? "" : ch;
     }
 
     /** v3.10 Issue 4：设置远程高危动作策略 */
@@ -349,6 +367,11 @@ public class TaskRunner {
     private static String truncate(String s, int n) {
         if (s == null) return "";
         return s.length() > n ? s.substring(0, n) + "..." : s;
+    }
+
+    /** v3.59 步骤4：空串转 null（SkillCardStore.repair 用 null 表示"该字段不变"）。 */
+    private static String nullIfEmpty(String s) {
+        return (s == null || s.trim().isEmpty()) ? null : s;
     }
 
     // ===== v3.57 本地编程能力：root 文件通道 =====
@@ -940,6 +963,14 @@ public class TaskRunner {
                 }
             }
             case "search": {
+                // 学习梯子第 2 级：每任务联网搜索上限 2 轮，无果不硬耗（SPEC 一）
+                if (ladder.searchBudgetLeft() <= 0) {
+                    lastOutput = "本任务已用完 2 轮搜索预算（学习梯子第 2 级上限）。"
+                            + "不要再调 search；下一步走梯子第 3 级：用 ask_user 把问题"
+                            + "（带候选选项）问用户，问完按用户选择做。";
+                    log(lastOutput);
+                    return false;
+                }
                 // 联网搜索（DuckDuckGo，无需 key），结果可存变量供后续步骤用
                 String query = st.getString("query");
                 int count = st.optInt("count", 5);
@@ -1014,11 +1045,121 @@ public class TaskRunner {
                     log(lastOutput);
                     String saveAs = st.optString("save_as", "");
                     if (!saveAs.isEmpty()) params.put(saveAs, lastOutput);
-                    return !titles.isEmpty();
+                    boolean found = !titles.isEmpty();
+                    ladder.recordSearch(found);
+                    return found;
                 } catch (Exception e) {
+                    ladder.recordSearch(false);
                     log("搜索失败: " + e.getMessage());
                     return false;
                 }
+            }
+            case "ask_user": {
+                // 学习梯子第 3 级：两轮搜完无果，问用户一句（选项式）
+                String question = st.optString("question", "").trim();
+                if (question.isEmpty()) {
+                    lastOutput = "ask_user 缺少 question 参数：请说清要问用户什么，"
+                            + "并用 options 给出候选选项（JSON 数组字符串）。";
+                    log(lastOutput);
+                    return false;
+                }
+                java.util.List<String> optList = new java.util.ArrayList<String>();
+                String optsRaw = st.optString("options", "").trim();
+                if (!optsRaw.isEmpty()) {
+                    try {
+                        org.json.JSONArray ja = new org.json.JSONArray(optsRaw);
+                        for (int i = 0; i < ja.length(); i++)
+                            optList.add(ja.optString(i, ""));
+                    } catch (Exception e) {
+                        // 非 JSON 时按逗号/换行切分兜底
+                        for (String p : optsRaw.split("[,\n]")) optList.add(p);
+                    }
+                }
+                String hint = st.optString("hint", "").trim();
+                String[] opts = LearningLadder.capOptions(
+                        optList.toArray(new String[0]));
+                String payload = LearningLadder.formatAsk(question, opts)
+                        + (hint.isEmpty() ? "" : "\n补充说明：" + hint);
+                ladder.markAsked();
+                // 学习梯子步骤2：通道解析——实例字段优先（TgBot /task 显式设置），
+                // 否则回退 AgentLoop 维护的 PhoneTools.sessionChannel
+                String ch = channel;
+                if (ch == null || ch.isEmpty()) {
+                    try {
+                        ch = PhoneTools.sessionChannel;
+                    } catch (Exception ignored) {
+                    }
+                }
+                boolean useOverlay = ("app".equals(ch)
+                        || ch == null || ch.isEmpty()) && !remote;
+                if (useOverlay) {
+                    // App 通道：全局悬浮窗选项式提问（120 秒超时）
+                    try {
+                        String[] buttons = opts.length == 0
+                                ? new String[]{"知道了"} : opts;
+                        int r = ApproveOverlay.askCustom(ctx,
+                                "需要你确认一下", payload,
+                                buttons, buttons.length - 1);
+                        if (r >= 0 && r < buttons.length) {
+                            lastOutput = "用户选择了：「" + buttons[r]
+                                    + "」。请按此选择继续。";
+                            log("用户回答: " + buttons[r]);
+                        } else if (r == -1) {
+                            lastOutput = "用户 120 秒内未回应（按默认处理）。"
+                                    + "请在结论中说明情况并收尾，不要重复提问。";
+                            log("询问超时，用户未回应");
+                        } else {
+                            lastOutput = "无法弹出询问（无悬浮窗权限）。"
+                                    + "请把下面的选项式问题写进最终结论，"
+                                    + "用户回复后另起任务继续：\n" + payload;
+                            log("悬浮窗不可用，转结论提问");
+                        }
+                        return r >= 0;
+                    } catch (Exception e) {
+                        lastOutput = "询问失败（" + e.getMessage() + "）。"
+                                + "请把选项式问题写进最终结论：\n" + payload;
+                        log(lastOutput);
+                        return false;
+                    }
+                }
+                if ("tg".equals(ch)) {
+                    // 学习梯子步骤2：TG 同步提问——任务线程挂起，
+                    // 等主人下一条回复（120s 超时），轮询线程继续收消息不死锁
+                    try {
+                        TgBot bot = TgBot.current();
+                        if (bot != null && bot.isRunning()) {
+                            String ans = bot.askUserSync(
+                                    bot.getOwnerChatId(), payload,
+                                    optList, 120000L);
+                            if (ans != null && !ans.isEmpty()) {
+                                lastOutput = "用户选择了：「" + ans
+                                        + "」。请按此选择继续。";
+                                log("用户回答: " + ans);
+                                return true;
+                            }
+                            if (ans == null) {
+                                lastOutput = "用户 120 秒内未回应（按默认处理）。"
+                                        + "请在结论中说明情况并收尾，不要重复提问。";
+                                log("TG 提问超时，用户未回应");
+                            } else {
+                                lastOutput = "用户取消了提问（发送了新指令）。"
+                                        + "请停止追问并收尾。";
+                                log("TG 提问被新指令打断");
+                            }
+                            return false;
+                        }
+                        log("TG Bot 未运行，转结论提问");
+                    } catch (Exception e) {
+                        log("TG 提问异常（" + e.getMessage() + "），转结论提问");
+                    }
+                }
+                // 远控通道：HTTP 异步 taskId 模式无聊天回路，任务内无同步提问能力，
+                // 诚实降级——模型把选项式问题写进最终结论，用户回复即新任务。
+                lastOutput = "当前通道（" + ch + "）不支持任务内同步提问。"
+                        + "请把下面的选项式问题原样写进最终结论，"
+                        + "用户回复后另起任务继续：\n" + payload;
+                log(ch + " 通道转结论提问");
+                return false;
             }
             case "vision": {
                 // 视觉问答：截屏发给视觉模型（看不到的按钮/判断前后摄像头就用它）
@@ -1584,7 +1725,8 @@ public class TaskRunner {
                 return true;
             }
             case "use_card": {
-                // 调用技能卡：script 型跑 shell，skill 型跑步骤
+                // v3.58 步骤3：调卡 + 生命周期状态机落账 + 失败时界面地图联动。
+                // 计数由 recordUse 一次完成（旧的 incrementUse 已移除，避免双计数）。
                 String cardId = st.getString("id");
                 SkillCardStore cardStore = new SkillCardStore(ctx);
                 SkillCardStore.Card card = cardStore.get(cardId);
@@ -1592,83 +1734,81 @@ public class TaskRunner {
                     log("技能卡不存在: " + cardId);
                     return false;
                 }
-                cardStore.incrementUse(cardId);
-                log("📇 使用技能卡：" + card.name
-                        + "（" + card.typeLabel() + "·" + card.sourceLabel() + "）");
-                if (SkillCardStore.TYPE_SCRIPT.equals(card.type)) {
-                    String out = rootCmdOut(card.content);
-                    lastOutput = truncate(out, 1500);
-                    if (!lastOutput.isEmpty()) log("输出: " + lastOutput);
-                    return !out.startsWith("__ERR__");
-                } else {
-                    // v2.52：技能卡铁律——无论成功失败，结束必回桌面
-                    boolean cardOk = true;
-                    // 兼容两种格式：{"steps":[...]} 或裸数组 [...]
-                    JSONArray csteps = null;
-                    String ct = card.content == null ? ""
-                            : card.content.trim();
-                    boolean proseCard = !(ct.startsWith("[") || ct.startsWith("{"));
-                    if (proseCard) {
-                        // 说明型卡：content 是自然语言操作说明（非步骤 JSON），
-                        // 不是执行失败——把全文作为指令回给 agent 按说明逐步执行
-                        lastOutput = "说明型技能卡《" + card.name
-                                + "》：本卡是操作说明，未自动执行任何动作。"
-                                + "请严格按下述说明、用你自己的工具逐步完成，"
-                                + "结束条件以说明为准；说明与本次目标冲突处以用户本次目标为准。"
-                                + "[注意：以下是一段文字说明，不是手机屏幕上的内容；"
-                                + "不要用 tap_text 去点击说明里的文字，按说明打开对应 App 后用 vision 定位再 tap]\n"
-                                + card.content;
-                        log("📇 说明型技能卡，已把说明全文回给执行者：" + card.name);
-                        return true;
-                    }
-                    try {
-                        if (ct.startsWith("[")) {
-                            csteps = new JSONArray(ct);
-                        } else {
-                            JSONObject cj = new JSONObject(ct);
-                            csteps = cj.optJSONArray("steps");
-                        }
-                    } catch (Exception e) {
-                        lastOutput = "技能卡解析异常：" + e.getMessage();
-                        log("技能卡解析异常: " + e.getMessage());
-                        return false;
-                    }
-                    if (csteps == null || csteps.length() == 0) {
-                        lastOutput = "技能卡步骤为空（JSON 里没有 steps）";
-                        log("技能卡步骤为空");
-                        return false;
-                    }
-                    try {
-                        for (int ci = 0; ci < csteps.length(); ci++) {
-                            if (stopped) return false;
-                            JSONObject cs = TaskRunner.substitute(
-                                    csteps.getJSONObject(ci), params);
-                            if (!runStep(cs, params, depth + 1)) {
-                                // v2.53：可选步骤失败只跳过，不中断整卡
-                                if (cs.optBoolean("optional", false)) {
-                                    log("可选步骤跳过 (" + (ci + 1) + ")");
-                                    continue;
-                                }
-                                log("技能卡步骤失败于 " + (ci + 1));
-                                lastOutput = "技能卡《" + card.name + "》执行失败于第 "
-                                        + (ci + 1) + " 步：" + cs.toString();
-                                cardOk = false;
-                                break;
-                            }
-                        }
-                    } finally {
-                        // v3.18：虚拟屏下不回桌面（没碰过主屏）
-                        if (!cardOk && !vdMode) {
-                            try {
-                                rootCmd("input keyevent 3");
-                                log("🏠 技能卡异常结束，已回桌面");
-                            } catch (Exception ignored) {
-                            }
-                        }
-                    }
-                    if (cardOk) lastOutput = "技能卡《" + card.name + "》步骤全部执行完成";
-                    return cardOk;
+                if (card.isDraft()) {
+                    log("📇 调卡提示：该卡为草稿卡（待复验），"
+                            + "本次调卡成功一次后自动转正");
                 }
+                log("📇 使用技能卡：" + card.name
+                        + "（" + card.typeLabel() + "·" + card.sourceLabel()
+                        + "·" + card.statusLabel() + "）");
+                String[] failNoteOut = new String[1]; // 失败时由 execUseCard 填入修卡原因
+                boolean cardDone = execUseCard(st, params, depth, card, failNoteOut);
+                if (!stopped) {
+                    // 用户主动中止不落账：避免「被叫停」误记为「卡坏了」
+                    String outcome = cardStore.recordUse(card.id, cardDone, failNoteOut[0]);
+                    if ("promoted".equals(outcome)) {
+                        log("📇 草稿卡复验成功，已转正");
+                    } else if ("needs_repair".equals(outcome)) {
+                        log("📇 调卡失败，已打回草稿待修卡："
+                                + (failNoteOut[0] == null ? "" : failNoteOut[0]));
+                    }
+                    if (!cardDone && card.appPkg != null && !card.appPkg.isEmpty()
+                            && cogStore != null) {
+                        // 卡的步骤失效时先对地图：把关联 App 的界面地图/图标词典
+                        // 注入 lastOutput，供修卡方先读地图、再调 repair 修卡
+                        String ib = cogStore.iconBlock(card.appPkg);
+                        if (!ib.isEmpty()) {
+                            lastOutput = lastOutput + "\n[界面地图·供修卡参考]"
+                                    + "卡的步骤失效，先对地图再改卡：\n" + ib;
+                            log("📇 已注入关联 App（" + card.appPkg
+                                    + "）的界面地图/图标词典供修卡参考");
+                        }
+                    }
+                }
+                return cardDone;
+            }
+            case "repair_card": {
+                // v3.59 步骤4：就地修卡。只传 id=读卡（返回当前内容+状态+失败记录，不改卡）；
+                // 传 content+note=修卡（旧版本快照→打回草稿→复验转正）。
+                String rcId = st.getString("id");
+                SkillCardStore rcStore = new SkillCardStore(ctx);
+                SkillCardStore.Card rc = rcStore.get(rcId);
+                if (rc == null) {
+                    log("修卡失败：技能卡不存在: " + rcId);
+                    return false;
+                }
+                String newContent = nullIfEmpty(st.optString("content"));
+                if (newContent == null) {
+                    StringBuilder sb = new StringBuilder();
+                    sb.append("卡片[").append(rc.id).append("] ").append(rc.name)
+                            .append("（").append(rc.typeLabel()).append("·")
+                            .append(rc.sourceLabel()).append("·").append(rc.statusLabel())
+                            .append("·v").append(rc.version).append("）\n")
+                            .append("触发：").append(rc.trigger == null ? "" : rc.trigger).append("\n")
+                            .append("内容：\n").append(rc.content == null ? "" : rc.content);
+                    if (rc.repairNote != null && !rc.repairNote.isEmpty())
+                        sb.append("\n失败记录：").append(rc.repairNote);
+                    lastOutput = sb.toString();
+                    log("📇 已读出技能卡内容（未改动）: " + rc.name);
+                    return true;
+                }
+                String rcNote = st.optString("note");
+                boolean ok = rcStore.repair(rcId,
+                        nullIfEmpty(st.optString("name")),
+                        nullIfEmpty(st.optString("trigger")),
+                        newContent,
+                        nullIfEmpty(st.optString("summary")),
+                        rcNote == null ? "" : rcNote);
+                if (ok) {
+                    log("📇 已修卡（旧版本已快照，可回滚）：" + rc.name
+                            + " → 打回草稿，复验成功一次后自动转正"
+                            + ((rcNote == null || rcNote.isEmpty()) ? "" : "；病因：" + rcNote));
+                    lastOutput = "修卡成功：已打回草稿（v" + (rc.version + 1)
+                            + "）。之后再调卡成功一次自动转正。";
+                } else {
+                    log("修卡失败：repair 返回 false: " + rcId);
+                }
+                return ok;
             }
             case "skill": {
                 // 子技能调用：按 name 找已启用的技能，带 params 执行
@@ -1711,6 +1851,118 @@ public class TaskRunner {
         }
     }
 
+    /**
+     * v3.58 步骤3：use_card 的实际执行体（从 runStep 的 case 中抽出，
+     * 使「执行」与「状态机落账」分离——落账统一在 case 收尾处做一次）。
+     * 失败时把修卡原因填入 failNoteOut[0]；返回 true=调卡成功。
+     */
+    private boolean execUseCard(JSONObject st, JSONObject params, int depth,
+                                SkillCardStore.Card card, String[] failNoteOut)
+            throws Exception {
+        // 调用技能卡：script 型跑 shell，skill 型跑步骤
+        if (SkillCardStore.TYPE_SCRIPT.equals(card.type)) {
+            String out = rootCmdOut(card.content);
+            lastOutput = truncate(out, 1500);
+            if (!lastOutput.isEmpty()) log("输出: " + lastOutput);
+            boolean ok = !out.startsWith("__ERR__");
+            if (!ok) failNoteOut[0] = buildCardFailNote("script", 0, null, lastOutput);
+            return ok;
+        }
+        // v2.52：技能卡铁律——无论成功失败，结束必回桌面
+        boolean cardOk = true;
+        // 兼容两种格式：{"steps":[...]} 或裸数组 [...]
+        JSONArray csteps = null;
+        String ct = card.content == null ? "" : card.content.trim();
+        boolean proseCard = !(ct.startsWith("[") || ct.startsWith("{"));
+        if (proseCard) {
+            // 说明型卡：content 是自然语言操作说明（非步骤 JSON），
+            // 不是执行失败——把全文作为指令回给 agent 按说明逐步执行
+            lastOutput = "说明型技能卡《" + card.name
+                    + "》：本卡是操作说明，未自动执行任何动作。"
+                    + "请严格按下述说明、用你自己的工具逐步完成，"
+                    + "结束条件以说明为准；说明与本次目标冲突处以用户本次目标为准。"
+                    + "[注意：以下是一段文字说明，不是手机屏幕上的内容；"
+                    + "不要用 tap_text 去点击说明里的文字，按说明打开对应 App 后用 vision 定位再 tap]\n"
+                    + card.content;
+            log("📇 说明型技能卡，已把说明全文回给执行者：" + card.name);
+            return true;
+        }
+        try {
+            if (ct.startsWith("[")) {
+                csteps = new JSONArray(ct);
+            } else {
+                JSONObject cj = new JSONObject(ct);
+                csteps = cj.optJSONArray("steps");
+            }
+        } catch (Exception e) {
+            lastOutput = "技能卡解析异常：" + e.getMessage();
+            log("技能卡解析异常: " + e.getMessage());
+            failNoteOut[0] = buildCardFailNote("parse", 0, e.getMessage(), lastOutput);
+            return false;
+        }
+        if (csteps == null || csteps.length() == 0) {
+            lastOutput = "技能卡步骤为空（JSON 里没有 steps）";
+            log("技能卡步骤为空");
+            failNoteOut[0] = buildCardFailNote("empty", 0, null, lastOutput);
+            return false;
+        }
+        try {
+            for (int ci = 0; ci < csteps.length(); ci++) {
+                if (stopped) return false;
+                JSONObject cs = TaskRunner.substitute(csteps.getJSONObject(ci), params);
+                if (!runStep(cs, params, depth + 1)) {
+                    // v2.53：可选步骤失败只跳过，不中断整卡
+                    if (cs.optBoolean("optional", false)) {
+                        log("可选步骤跳过 (" + (ci + 1) + ")");
+                        continue;
+                    }
+                    log("技能卡步骤失败于 " + (ci + 1));
+                    lastOutput = "技能卡《" + card.name + "》执行失败于第 "
+                            + (ci + 1) + " 步：" + cs.toString();
+                    cardOk = false;
+                    failNoteOut[0] = buildCardFailNote("step", ci + 1,
+                            cs.optString("do", "?") + " " + truncate(cs.toString(), 200),
+                            lastOutput);
+                    break;
+                }
+            }
+        } finally {
+            // v3.18：虚拟屏下不回桌面（没碰过主屏）
+            if (!cardOk && !vdMode) {
+                try {
+                    rootCmd("input keyevent 3");
+                    log("🏠 技能卡异常结束，已回桌面");
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        if (cardOk) lastOutput = "技能卡《" + card.name + "》步骤全部执行完成";
+        return cardOk;
+    }
+
+    /**
+     * v3.58 步骤3（纯函数，JVM 可单测）：调卡失败的修卡原因落账文案。
+     * kind: parse / empty / script / step；stepNo 仅 step 型用（1-based）；
+     * stepSum 为失败步骤摘要，output 为执行输出/错误文本（供病因分类）。
+     */
+    static String buildCardFailNote(String kind, int stepNo, String stepSum, String output) {
+        String c = Telemetry.classifyFail("use_card", false, output);
+        if (c == null || c.isEmpty()) c = "unknown";
+        if ("parse".equals(kind)) {
+            return "技能卡解析异常：" + (stepSum == null ? "" : stepSum) + "；病因：" + c;
+        }
+        if ("empty".equals(kind)) {
+            return "技能卡步骤为空（JSON 里没有 steps）；病因：" + c;
+        }
+        if ("script".equals(kind)) {
+            String o = output == null ? "" : output;
+            if (o.length() > 120) o = o.substring(0, 120) + "…";
+            return "脚本执行失败：" + o + "；病因：" + c;
+        }
+        String s = stepSum == null ? "" : stepSum;
+        if (s.length() > 160) s = s.substring(0, 160) + "…";
+        return "第" + stepNo + "步失败：" + s + "；病因：" + c;
+    }
     /**
      * v3.13 Issue 11：本地视觉降级（零依赖）。
      * 从问题中提取候选文字，在无障碍节点树里找匹配节点的中心坐标。

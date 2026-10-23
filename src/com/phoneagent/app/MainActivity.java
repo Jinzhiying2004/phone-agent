@@ -42,7 +42,7 @@ public class MainActivity extends Activity {
     private static final int REQ_IMPORT = 1001;
 
     private LinearLayout pageHome, pageRemote, pageAgent, pageTerm, pageMy;
-    private Button tabHome, tabRemote, tabAgent, tabTerm, tabMy;
+    private TabIconView tabHome, tabRemote, tabAgent, tabTerm, tabMy;
     // v2.64：tabBar 和 content 改字段，供焦点监听控制显隐
     private LinearLayout tabBarView;
     private LinearLayout contentView;
@@ -5204,11 +5204,11 @@ public class MainActivity extends Activity {
         pageAgent.setVisibility(idx == 2 ? View.VISIBLE : View.GONE);
         pageTerm.setVisibility(idx == 3 ? View.VISIBLE : View.GONE);
         pageMy.setVisibility(idx == 4 ? View.VISIBLE : View.GONE);
-        styleTab(tabHome, idx == 0);
-        styleTab(tabRemote, idx == 1);
-        styleTab(tabAgent, idx == 2);
-        styleTab(tabTerm, idx == 3);
-        styleTab(tabMy, idx == 4);
+        tabHome.setActive(idx == 0);
+        tabRemote.setActive(idx == 1);
+        tabAgent.setActive(idx == 2);
+        tabTerm.setActive(idx == 3);
+        tabMy.setActive(idx == 4);
         // v2.86：切到智能体页时滚到底（别停在顶部看旧消息）
         if (idx == 2 && agentScrollView != null) {
             agentScrollView.post(() -> agentScrollView.fullScroll(
@@ -5216,35 +5216,14 @@ public class MainActivity extends Activity {
         }
     }
 
-    // v2.61：胶囊 tab 样式（Material 3 Expressive）
-    private void styleTab(Button b, boolean selected) {
-        android.graphics.drawable.GradientDrawable d =
-                new android.graphics.drawable.GradientDrawable();
-        d.setShape(android.graphics.drawable.GradientDrawable.RECTANGLE);
-        d.setCornerRadius(dp(20));
-        if (selected) {
-            d.setColor(DyColor.primary(this));
-            b.setTextColor(Color.WHITE);
-        } else {
-            d.setColor(Color.TRANSPARENT);
-            b.setTextColor(TEXT_DARK);
-        }
-        b.setBackground(d);
-    }
-
-    // v2.66：tab 用图标代替文字
-    private Button makeTab(String s, int idx) {
-        Button b = new Button(this);
-        b.setText(s);
-        b.setTextSize(22);
-        b.setPadding(dp(4), dp(10), dp(4), dp(10));
-        // 去掉系统默认按钮背景
-        b.setBackground(null);
+    // v3.58：tab 图标改单色细线条矢量绘制（TabIconView），选中态胶囊底由图标视图自绘
+    private TabIconView makeTab(int kind, int idx) {
+        TabIconView b = new TabIconView(this, kind);
         // 无障碍：读屏时报文字名
         String[] names = {"主页", "远控", "思考执行员", "终端", "我的"};
         if (idx >= 0 && idx < names.length) b.setContentDescription(names[idx]);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+                0, dp(46), 1f);
         lp.setMargins(dp(2), 0, dp(2), 0);
         b.setLayoutParams(lp);
         b.setOnClickListener(v -> showPage(idx));
@@ -5475,11 +5454,11 @@ public class MainActivity extends Activity {
         capsuleBg.setColor(0xD9FFFFFF); // 85% 白，半透明
         tabBar.setBackground(capsuleBg);
         tabBar.setElevation(dp(8));
-        tabHome = makeTab("🏠", 0);
-        tabRemote = makeTab("📡", 1);
-        tabAgent = makeTab("🤖", 2);
-        tabTerm = makeTab("💻", 3);
-        tabMy = makeTab("👤", 4);
+        tabHome = makeTab(TabIconView.HOME, 0);
+        tabRemote = makeTab(TabIconView.REMOTE, 1);
+        tabAgent = makeTab(TabIconView.AGENT, 2);
+        tabTerm = makeTab(TabIconView.TERM, 3);
+        tabMy = makeTab(TabIconView.MY, 4);
         tabBar.addView(tabHome);
         tabBar.addView(tabRemote);
         tabBar.addView(tabAgent);
