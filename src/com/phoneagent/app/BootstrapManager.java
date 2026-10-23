@@ -109,6 +109,113 @@ public class BootstrapManager {
         return isInstalled() && isMounted();
     }
 
+    // ================= v3.57 本地编程能力步骤4：Termux 首启自动装 python+git =================
+
+    /** 运行时（python3+git）是否已就绪 */
+    public boolean isRuntimeReady() {
+        return pref.getBoolean("runtime_ready", false);
+    }
+
+    private volatile boolean runtimeInstalling = false;
+
+    /**
+     * 确保 Termux 内 python3+git 可用（首启自动装）。
+     * - runtime_ready=true 直接返回；
+     * - 正在安装中则不重复起线程；
+     * - 否则后台线程：pkg update && pkg install -y python git（超时 10 分钟）
+     *   → python3 -V && git --version 验执行链 → 成功写 runtime_ready=true；
+     *   无网/失败写 runtime_pending=true（下次调用重试）。
+     * 不抛异常、不卡任务：结果只走 listener。
+     */
+    public void ensureRuntime(final ProgressListener listener) {
+        final ProgressListener l = listener == null
+                ? new ProgressListener() {
+                    public void onProgress(int p) {}
+                    public void onDone(boolean ok, String msg) {}
+                } : listener;
+        if (!isInstalled()) {
+            l.onDone(false, "Termux 环境未安装");
+            return;
+        }
+        if (isRuntimeReady()) {
+            l.onDone(true, "python3/git 已就绪");
+            return;
+        }
+        if (runtimeInstalling) {
+            l.onDone(false, "python3/git 正在安装中");
+            return;
+        }
+        runtimeInstalling = true;
+        new Thread(() -> {
+            try {
+                l.onProgress(5);
+                int code = execInTermux(
+                        "pkg update -y && pkg install -y python git",
+                        10 * 60 * 1000);
+                if (code != 0) {
+                    pref.edit().putBoolean("runtime_pending", true).apply();
+                    l.onDone(false, "安装 python/git 失败（exit=" + code
+                            + "，可能无网；稍后自动重试）");
+                    return;
+                }
+                l.onProgress(80);
+                int v = execInTermux("python3 -V && git --version", 60 * 1000);
+                if (v == 0) {
+                    pref.edit().putBoolean("runtime_ready", true)
+                            .putBoolean("runtime_pending", false).apply();
+                    l.onDone(true, "python3/git 安装完成并通过执行链验证");
+                } else {
+                    pref.edit().putBoolean("runtime_pending", true).apply();
+                    l.onDone(false,
+                            "执行链验证失败（python3/git 不可用），稍后重试");
+                }
+            } catch (Exception e) {
+                pref.edit().putBoolean("runtime_pending", true).apply();
+                l.onDone(false, "安装异常：" + e.getMessage() + "，稍后重试");
+            } finally {
+                runtimeInstalling = false;
+            }
+        }).start();
+    }
+
+    /**
+     * 在 Termux 环境内执行命令（staging 目录直跑，免 root）。
+     * 返回退出码；超时返回 124；异常返回 127。不抛异常。
+     */
+    private int execInTermux(String cmd, long timeoutMs) {
+        try {
+            String prefix = stagingDir().getAbsolutePath();
+            java.io.File bashFile = new java.io.File(prefix + "/bin/bash");
+            if (!bashFile.exists()) return 127;
+            if (!bashFile.canExecute()) bashFile.setExecutable(true);
+            ProcessBuilder pb = new ProcessBuilder(
+                    bashFile.getAbsolutePath(), "-c", cmd);
+            pb.environment().clear();
+            pb.environment().putAll(termuxEnv());
+            pb.redirectErrorStream(true);
+            Process pr = pb.start();
+            // 消费输出防管道阻塞（安装日志量大）
+            Thread drain = new Thread(() -> {
+                try {
+                    byte[] buf = new byte[8192];
+                    java.io.InputStream in = pr.getInputStream();
+                    while (in.read(buf) >= 0) { /* 丢弃 */ }
+                } catch (Exception ignored) {}
+            });
+            drain.setDaemon(true);
+            drain.start();
+            boolean done = pr.waitFor(timeoutMs,
+                    java.util.concurrent.TimeUnit.MILLISECONDS);
+            if (!done) {
+                pr.destroyForcibly();
+                return 124;
+            }
+            return pr.exitValue();
+        } catch (Exception e) {
+            return 127;
+        }
+    }
+
     /** 后台下载 bootstrap，带进度与 SHA256 校验 */
     public void download(final ProgressListener listener) {
         new Thread(() -> {
@@ -238,6 +345,8 @@ public class BootstrapManager {
                 pref.edit().putBoolean("installed", true)
                         .putString("version", BOOTSTRAP_VERSION).apply();
                 listener.onDone(true, "环境安装完成");
+                // v3.57：安装完成后自动触发 runtime 安装（python3+git），后台不阻塞
+                ensureRuntime(null);
             } catch (Exception e) {
                 listener.onDone(false, "安装失败：" + e.getMessage());
             }

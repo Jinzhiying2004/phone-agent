@@ -48,18 +48,30 @@ public class PhoneTools {
                 prop("timeout", "integer", "超时秒，默认10")));
         arr.put(fn("use_card", "调用已保存的技能卡",
                 req("id"), prop("id", "string", "技能卡id")));
-        arr.put(fn("termux", "内置 Termux 跑命令（查信息/算数/文件优先用它）",
+        arr.put(fn("termux", "内置 Termux（bash/python3/git）：能写脚本解决的优先写脚本，"
+                + "不要手点界面；改软件先找它的配置文件/数据文件（用 read_file 读），"
+                + "改完用脚本验证状态",
                 req("cmd"), prop("cmd", "string", "命令")));
         arr.put(fn("shell", "执行 root shell 命令",
                 req("cmd"), prop("cmd", "string", "命令")));
         arr.put(fn("search", "联网搜索",
                 req("query"), prop("query", "string", "搜索词"),
                 prop("count", "integer", "结果数，默认5")));
-        arr.put(fn("read_file", "读文件",
+        arr.put(fn("read_file", "读文件（本软件私有目录之外自动 root 提权读，"
+                + "如其他 App 的 /data/data；找配置优先用它）",
                 req("path"), prop("path", "string", "路径")));
-        arr.put(fn("write_file", "写文件",
+        arr.put(fn("write_file", "写文件（域外自动 root 提权原位写，"
+                + "保留原文件属主与权限）",
                 req("path", "content"),
                 prop("path", "string", "路径"), prop("content", "string", "内容")));
+        // v3.57 本地编程能力：片段编辑，按原文片段精确替换，只改几行/大文件时用它（不用整写）。
+        // 域外路径自动 root 提权原位写；找不到片段时失败并给出候选行提示。
+        arr.put(fn("edit_file", "片段编辑文件：按原文片段精确替换",
+                req("path", "old", "new"),
+                prop("path", "string", "路径"),
+                prop("old", "string", "待替换原文片段，必须精确匹配（含缩进）"),
+                prop("new", "string", "替换后文本"),
+                prop("occurrence", "integer", "第几次出现，默认1")));
         arr.put(fn("fetch_url", "抓网页正文",
                 req("url"), prop("url", "string", "网址")));
         arr.put(fn("remember", "记住用户信息，下次直接用",
@@ -80,7 +92,8 @@ public class PhoneTools {
             step.put("do", name);
             for (String k : new String[]{"text", "x", "y", "question", "from", "to",
                     "package", "s", "timeout", "id", "cmd", "query", "count",
-                    "path", "content", "url", "key", "value"}) {
+                    "path", "content", "url", "key", "value",
+                    "old", "new", "occurrence"}) {
                 if (args.has(k)) step.put(k, args.get(k));
             }
             return step.toString();

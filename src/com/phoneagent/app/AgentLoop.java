@@ -85,6 +85,21 @@ return taskBook != null ? taskBook.clarifyOptions : new java.util.ArrayList<Stri
 private TaskRunLogger taskLogger = null;
 private String lastHistory = "";
 private final java.util.List<JSONObject> auditSteps = new java.util.ArrayList<>();
+/** v3.58 步骤2：本轮各步骤前台包名投票（取众数为主前台包名，草稿卡 appPkg 用） */
+private final java.util.Map<String, Integer> fgPkgVotes = new java.util.HashMap<>();
+
+/** v3.58 步骤2：本轮主前台包名（各步骤出现次数最多者；无记录返回空串） */
+public String getMainPkg() {
+String best = "";
+int bestN = 0;
+for (java.util.Map.Entry<String, Integer> e : fgPkgVotes.entrySet()) {
+if (e.getValue() != null && e.getValue() > bestN) {
+bestN = e.getValue();
+best = e.getKey();
+}
+}
+return best;
+}
 
 public AgentLoop(Context ctx, LlmClient llm, Listener listener) {
 this.ctx = ctx.getApplicationContext();
@@ -313,6 +328,15 @@ System.currentTimeMillis() - runStartMs, lastActionsDone,
 expNote(ok));
 } catch (Exception ignored) {
 }
+// v3.58 步骤2：Distiller 技能卡草稿队列消费 -> 成功轨迹自动沉淀为草稿卡
+// （只沉淀成功轨迹；候选 votes>=2 才沉淀；草稿卡待同类复验成功后转正）
+try {
+String draftId = SharedMemory.maybeDraftSkillCard(ctx, goal, ok,
+lastHistory, getMainPkg(), expNote(ok));
+if (draftId != null) {
+log("📇 成功轨迹已沉淀为技能卡草稿（同类任务复验成功后转正）：" + draftId);
+}
+} catch (Exception ignored) {}
 return ok;
 } finally {
 // v3.51 步骤5：模型画像打点只活本任务，退出即卸 sink
@@ -385,6 +409,7 @@ return null;
 
 private boolean runSession(String goal, int maxSteps) {
 sessionStartMs = System.currentTimeMillis();
+fgPkgVotes.clear(); // v3.58 步骤2：本轮前台包投票清零
 log("🎯 目标：" + goal);
 try {
 taskLogger = new TaskRunLogger(ctx, goal);
@@ -496,12 +521,17 @@ lastHistory = hist.toString();
 return false;
 }
 // v3.51 步骤5：每步环境打点（前台包/网络/步耗时/任务累计耗时）
-// fgPackage 复用 TaskRunner 的 10s TTL 缓存，零额外开销
+// fgPackage 复用 TaskRunner 的 10s TTL 缓存，零额外开销；
+// v3.58 步骤2：顺带给本轮主前台包名投票（草稿卡 appPkg 界面地图锚点用）
 try {
 long stepT0 = System.currentTimeMillis();
 long prevMs = lastStepT0 > 0 ? stepT0 - lastStepT0 : 0;
 lastStepT0 = stepT0;
-Telemetry.stepEnv(ctx, channel, runner.fgPackage(), netOk(),
+String stepFg = runner.fgPackage();
+if (stepFg != null && !stepFg.isEmpty()) {
+fgPkgVotes.put(stepFg, fgPkgVotes.getOrDefault(stepFg, 0) + 1);
+}
+Telemetry.stepEnv(ctx, channel, stepFg, netOk(),
 prevMs, stepT0 - sessionStartMs);
 } catch (Exception ignored) {}
 // 用户实时反馈（App 通道）
@@ -1055,6 +1085,7 @@ for (int i = 0; i < all.length(); i++) {
 JSONObject w = all.getJSONObject(i);
 String n = w.getJSONObject("function").optString("name");
 if (n.equals("shell") || n.equals("read_file") || n.equals("write_file")
+|| n.equals("edit_file")
 || n.equals("fetch_url") || n.equals("search")) continue;
 out.put(w);
 }
@@ -1083,6 +1114,8 @@ p.append("本任务主显示锁定为实体屏：直接在实体屏操作，不�
 }
 p.append("先理解用户真正要什么再动手：结合对话上下文和当前界面理解指代与言外之意，按目标推进，不要逐字死磕字面步骤；此路不通时换方法继续朝目标走。");
 p.append("\n你通过工具看屏和操作（执行通道 root 优先，无 root 才用无障碍）。完成任务后，用一段文字回复用户结果（不再调工具即结束）。");
+// v3.57 本地编程能力：编程优先——改软件先找配置/数据文件，能写脚本别手点
+p.append("改软件/系统层时：先用 read_file 找它的配置与数据文件（/data/data/<包名>/shared_prefs/*.xml、databases、files），读懂再改；能改文件或写脚本（termux 里 python3/bash）解决的，不要进界面手点；改完用 shell/termux 查状态验证，不要只看界面。");
 p.append("领取/奖励类任务的停止线：界面出现『领取成功/已领取』就代表本次目标对象已到账，立即收尾报告；『再看N个提前得明日/下一份』是 App 的链条推销，属于目标外，一律不跟进，点『坚持退出』退出。");
 if (cogStore != null) {
 String icons = cogStore.iconBlock(null);

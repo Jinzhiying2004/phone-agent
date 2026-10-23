@@ -104,7 +104,11 @@ public class TaskBook {
             sb.append(dictText.trim()).append("\n");
         }
         sb.append("\n任务类型先验：领取类（含领取/免费/奖励/时长）/操作类（含打开/启动/设置）")
-                .append("/查询类（含查/多少/是什么/怎么）/问询类（其余）。\n\n");
+                .append("/查询类（含查/多少/是什么/怎么）/改造类（含改/修/配置软件）/问询类（其余）。\n");
+        // v3.57 本地编程能力：动作先验「文件/脚本优先」
+        sb.append("动作先验：改造类任务的动作为\"改造\"，优先「文件/脚本优先」"
+                + "（read_file 找配置 + edit_file 改，或 termux 写 python 脚本批量处理），"
+                + "不要进界面手点。\n\n");
         sb.append("输出 JSON（字段全要）：\n");
         sb.append("{\"target\":\"任务对象（如 汽水音乐今日免费听歌时长）\",")
                 .append("\"action\":\"动作（领取/打开/查询/设置/播放…）\",")
@@ -116,7 +120,8 @@ public class TaskBook {
                 .append("\"options\":[\"低置信时的澄清选项1\",\"选项2\"]}\n\n");
         sb.append("要求：\n");
         sb.append("1. criteria 必须是可观测的手机界面/系统状态")
-                .append("（出现某文案、某开关变为开、某文件生成），不许写\"任务完成\"这种空话。\n");
+                .append("（出现某文案、某开关变为开、某文件生成），不许写\"任务完成\"这种空话；")
+                .append("改造类判据示例：目标配置文件含某行/某键值。\n");
         sb.append("2. stop_lines 至少一条\"判据达成后的收尾动作\"；领取/奖励类必须有一条：")
                 .append("\"「再看N个提前得明日/提前享」是目标外链条，出现即拒绝并收尾\"。\n");
         sb.append("3. confidence 标尺：对象明确且可达 ≥0.7；对象多义/指代不明 ≤0.4")
@@ -191,6 +196,12 @@ sb.append("4. forbidden 默认至少含\"不许做与目标无关的充值/订�
             b.stopLines.add(new StopLine("出现「再看N个/提前得/提前享明日」",
                     "目标外链条，拒绝并收尾"));
             b.confidence = 0.7;
+        } else if (containsAny(g, "改掉", "修改", "配置", "修复")) {
+            // v3.57 本地编程能力：改造类（零 token 本地兜底也懂文件/脚本优先）
+            b.action = "改造";
+            b.criteria = "目标配置文件含某行/某键值（read_file 查状态验证）";
+            b.stopLines.add(new StopLine("判据达成", "收尾报告并回桌面"));
+            b.confidence = 0.6;
         } else if (containsAny(g, "打开", "启动", "进入")) {
             b.action = "打开";
             b.criteria = "目标应用进入前台（dumpsys/截屏确认）";

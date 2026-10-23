@@ -351,6 +351,106 @@ public class TaskRunner {
         return s.length() > n ? s.substring(0, n) + "..." : s;
     }
 
+    // ===== v3.57 本地编程能力：root 文件通道 =====
+
+    /** 路径是否在应用自家域内（私有目录 /data/data/<包名>/ 下 + 外部专属目录）。纯判定在 FileEditKit.isInAppDomain，可测。 */
+    private boolean inAppDomain(String path) {
+        try {
+            String canon = new java.io.File(path).getCanonicalPath();
+            String dataDir = new java.io.File(ctx.getApplicationInfo().dataDir).getCanonicalPath();
+            String ec = null;
+            java.io.File ext = ctx.getExternalFilesDir(null);
+            if (ext != null) ec = ext.getCanonicalPath();
+            return FileEditKit.isInAppDomain(canon, dataDir, ec);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** shell 单引号转义（委托 FileEditKit，行为不变）。 */
+    static String shQuote(String s) {
+        return FileEditKit.shQuote(s);
+    }
+
+    /** 纯函数：找 text 中 old 的第 occ 次出现位置；找不到返回 -1（委托 FileEditKit）。 */
+    static int findNth(String text, String old, int occ) {
+        return FileEditKit.findNth(text, old, occ);
+    }
+
+    static String md5Hex(byte[] data) {
+        return FileEditKit.md5Hex(data);
+    }
+
+    /**
+     * root 读文件（域外路径专用）。注意禁用裸 cat：
+     * RootShell 用行首 marker 判命令结束，文件无尾换行时 cat 输出与 marker 粘连必超时；
+     * 一律走 base64 输出、JVM 侧解码。失败返回 null。
+     */
+    private String rootReadFile(String path) {
+        if (!hasRoot()) {
+            log("域外读文件需要 root，当前无 root：" + path);
+            return null;
+        }
+        String out = rootCmdOut("base64 '" + shQuote(path) + "' 2>/dev/null; echo");
+        if (out == null || out.startsWith("__ERR__")) return null;
+        try {
+            byte[] raw = android.util.Base64.decode(out, android.util.Base64.DEFAULT);
+            return new String(raw, "UTF-8");
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * root 写文件（域外路径专用）：原文件存在时先备份为 path + ".bak"（备份成功才继续）；
+     * 内容经 base64 单行原位截断写入，写完用 md5 校验；任一步失败返回 false。
+     * 内容过大（>200KB）拒绝，避免 shell 行溢出。
+     */
+    private boolean rootWriteFile(String path, String content, boolean backup) {
+        if (!hasRoot()) {
+            log("域外写文件需要 root，当前无 root：" + path);
+            return false;
+        }
+        String q = "'" + shQuote(path) + "'";
+        try {
+            byte[] bytes = content.getBytes("UTF-8");
+            String wantMd5 = md5Hex(bytes);
+            if (wantMd5.isEmpty()) {
+                log("md5 计算失败，中止写入");
+                return false;
+            }
+            String ex = rootCmdOut("test -e " + q + " && echo yes || echo no");
+            if ("yes".equals(ex) && backup) {
+                String bk = rootCmdOut("cp " + q + " " + q + ".bak 2>/dev/null && md5sum " + q + ".bak");
+                if (bk == null || bk.startsWith("__ERR__")) {
+                    log("备份失败，中止写入：" + path + "（" + bk + "）");
+                    return false;
+                }
+                log("已备份：" + path + ".bak");
+            }
+            String b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP);
+            if (b64.length() > 200 * 1024) {
+                log("内容过大（" + bytes.length + " 字节），拒绝经 root 通道写入");
+                return false;
+            }
+            String w = rootCmdOut("printf '%s' '" + b64 + "' | base64 -d > " + q);
+            if (w.startsWith("__ERR__")) {
+                log("root 写入失败：" + w);
+                return false;
+            }
+            String got = rootCmdOut("md5sum " + q);
+            if (!got.startsWith(wantMd5)) {
+                log("写后校验失败（md5 不一致），备份在 " + path + ".bak");
+                return false;
+            }
+            log("root 写文件成功：" + path + "（" + bytes.length + " 字节，md5 校验通过）");
+            return true;
+        } catch (Exception e) {
+            log("root 写文件异常：" + e.getMessage());
+            return false;
+        }
+    }
+
     // v2.90：root 优先策略——有 root 用命令，无 root 用无障碍
     private Boolean cachedRoot = null;
 
@@ -589,18 +689,26 @@ public class TaskRunner {
      * 本地受信任务记警告放行。返回 true=允许执行。
      */
     private boolean riskGate(String do_, JSONObject st) {
-        ActionRisk.Level lv = ActionRisk.levelFor(do_);
+        String key = do_;
+        // v3.57：文件动作按路径选风险键——域外路径的 read_file/write_file
+        // 自动按 read_file_root/write_file_root 定级（防用普通读动作读别家私有数据）。
+        if (("read_file".equals(do_) || "write_file".equals(do_)) && st != null) {
+            try {
+                if (st.has("path") && !inAppDomain(st.getString("path"))) key = do_ + "_root";
+            } catch (Exception ignored) { }
+        }
+        ActionRisk.Level lv = ActionRisk.levelFor(key);
         int pol = riskPolicy.get(lv);
         if (pol == ActionRisk.ALLOW) return true;
         if (pol == ActionRisk.DENY) {
-            log("⛔ 动作被策略拒绝：" + do_ + "（" + lv.label + "）");
+            log("⛔ 动作被策略拒绝：" + key + "（" + lv.label + "）");
             return false;
         }
         // ASK
         String detail = truncate(st.toString(), 160);
         if (approver != null) {
-            boolean ok = approver.approve(do_ + "（" + lv.label + "）", detail);
-            if (!ok) log("⛔ 已拒绝高风险动作：" + do_);
+            boolean ok = approver.approve(key + "（" + lv.label + "）", detail);
+            if (!ok) log("⛔ 已拒绝高风险动作：" + key);
             return ok;
         }
         if (remote) {
@@ -768,6 +876,20 @@ public class TaskRunner {
                     // 免 root：直接用 staging 目录（官方 Termux 不需要 root）
                     if (!bm.isInstalled()) {
                         log("Termux 环境未安装，先在终端页下载安装");
+                        return false;
+                    }
+                    // v3.57：bootstrap 已装但 python/git 运行时未就绪 → 后台懒装，
+                    // 本次返回明确指引（ok=false，但附恢复路径，不算死失败）
+                    if (!bm.isRuntimeReady()) {
+                        bm.ensureRuntime(new BootstrapManager.ProgressListener() {
+                            public void onProgress(int percent) {}
+                            public void onDone(boolean ok, String msg) {
+                                log("Termux runtime 安装：" + msg);
+                            }
+                        });
+                        lastOutput = "python3/git 正在后台安装（约几十 MB），"
+                                + "本次先用 bash/awk，或稍后重试";
+                        log(lastOutput);
                         return false;
                     }
                     String prefix = bm.stagingDir().getAbsolutePath();
@@ -1000,6 +1122,92 @@ public class TaskRunner {
                     log("写文件失败: " + e.getMessage());
                     return false;
                 }
+            }
+            case "read_file_root": {
+                // v3.57：域外 root 读（riskGate 已按路径升级定级）
+                String rp2 = st.getString("path");
+                String txt2 = rootReadFile(rp2);
+                if (txt2 == null) {
+                    lastOutput = "";
+                    log("root 读文件失败: " + rp2);
+                    return false;
+                }
+                lastOutput = truncate(txt2, 2000);
+                log("root 读文件 " + rp2);
+                if (!lastOutput.isEmpty()) log("内容: " + lastOutput);
+                return true;
+            }
+            case "write_file_root": {
+                // v3.57：域外 root 写（备份 + md5 校验）
+                String wp2 = st.getString("path");
+                String content2 = st.optString("content", "");
+                boolean ok2 = rootWriteFile(wp2, content2, true);
+                lastOutput = ok2 ? ("write_file_root ok: " + wp2) : "";
+                return ok2;
+            }
+            case "edit_file": {
+                // v3.57：片段编辑。域内走本地读写；域外自动 root 提权原位写（先备份）。
+                String ep = st.getString("path");
+                String old = st.getString("old");
+                String newS = st.getString("new");
+                int occ = st.optInt("occurrence", 1);
+                // 设计 3.2：无意义调用提前拒绝（省一次读写）
+                if (old == null || old.isEmpty()) {
+                    log("edit_file 拒绝：old 为空");
+                    lastOutput = "";
+                    return false;
+                }
+                if (old.equals(newS)) {
+                    log("edit_file 拒绝：old 与 new 相同（无意义调用）");
+                    lastOutput = "";
+                    return false;
+                }
+                boolean domain = inAppDomain(ep);
+                String text = null;
+                if (domain) {
+                    try {
+                        text = new String(java.nio.file.Files.readAllBytes(
+                                new java.io.File(ep).toPath()), "UTF-8");
+                    } catch (Exception e) {
+                        log("读文件失败: " + e.getMessage());
+                    }
+                } else {
+                    text = rootReadFile(ep);
+                    if (text == null) log("root 读文件失败: " + ep);
+                }
+                if (text == null) {
+                    lastOutput = "";
+                    return false;
+                }
+                String updated = FileEditKit.applyEdit(text, old, newS, occ);
+                if (updated == null) {
+                    // 找不到：给出候选行提示（old 首非空行命中的行），纯逻辑见 FileEditKit
+                    String hint = FileEditKit.editHints(text, old, 10);
+                    log("片段未找到（第 " + occ + " 次出现）" +
+                            (!hint.isEmpty() ? "，疑似候选行：\n" + hint : "，无候选行"));
+                    lastOutput = hint;
+                    return false;
+                }
+                boolean ok;
+                if (domain) {
+                    try {
+                        java.io.File ef = new java.io.File(ep);
+                        if (ef.getParentFile() != null) ef.getParentFile().mkdirs();
+                        java.io.FileOutputStream fos = new java.io.FileOutputStream(ef);
+                        fos.write(updated.getBytes("UTF-8"));
+                        fos.close();
+                        log("片段编辑成功（域内）: " + ep + "（第 " + occ + " 次出现）");
+                        ok = true;
+                    } catch (Exception e) {
+                        log("片段编辑写回失败: " + e.getMessage());
+                        ok = false;
+                    }
+                } else {
+                    ok = rootWriteFile(ep, updated, true);
+                    if (ok) log("片段编辑成功（域外 root，备份已留）: " + ep);
+                }
+                lastOutput = ok ? ("edit_file ok: " + ep) : "";
+                return ok;
             }
             case "fetch_url": {
                 String url = st.getString("url");

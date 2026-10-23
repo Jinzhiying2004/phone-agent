@@ -55,12 +55,12 @@ public class ActionRisk {
                 "input", "launch", "read_file", "use_card", "skill",
                 "screen", "brightness", "volume", "vibrate", "torch",
                 "wifi", "bluetooth", "app_kill");
-        // HIGH：外部效应 / 网络 / 写文件
+        // HIGH：外部效应 / 网络 / 写文件；v3.57 读别家私有数据（read_file_root）升级审批
         put(Level.HIGH, "termux", "search", "fetch_url", "write_file",
-                "app_install", "sys_put", "airplane");
-        // CRITICAL：破坏性（root 任意命令 / 删应用 / 重启）
+                "app_install", "sys_put", "airplane", "read_file_root");
+        // CRITICAL：破坏性（root 任意命令 / 删应用 / 重启）；v3.57 root 写域外（write_file_root）与片段编辑（edit_file）同级
         put(Level.CRITICAL, "shell", "app_uninstall", "app_clear",
-                "reboot", "kill");
+                "reboot", "kill", "write_file_root", "edit_file");
     }
 
     private static void put(Level lv, String... actions) {

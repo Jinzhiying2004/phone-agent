@@ -35,6 +35,12 @@ public class SkillCardStore {
     public static final String SRC_USER = "user";
     public static final String SRC_AGENT = "agent";
 
+    /** 技能卡生命周期（v3.58 步骤1）：draft 草稿（待复验）/ official 已转正 */
+    public static final String STATUS_DRAFT = "draft";
+    public static final String STATUS_OFFICIAL = "official";
+    /** 版本历史每卡上限 */
+    public static final int VERSION_HISTORY_CAP = 20;
+
     public static class Card {
         public String id;
         public String name;
@@ -45,6 +51,24 @@ public class SkillCardStore {
         public String summary;
         public int useCount;
         public long updatedAt;
+        /** 生命周期：draft 草稿（待复验）/ official 已转正；旧卡默认 official */
+        public String status = STATUS_OFFICIAL;
+        /** 内容修订号（单调递增，回滚也递增） */
+        public int version = 1;
+        /** 草稿卡复验成功计数 */
+        public int verifyCount = 0;
+        /** 最近一次失败/修卡原因（就地修卡依据） */
+        public String repairNote = "";
+        /** 关联 App 包名（界面地图联动锚点） */
+        public String appPkg = "";
+
+        public boolean isDraft() {
+            return STATUS_DRAFT.equals(status);
+        }
+
+        public String statusLabel() {
+            return isDraft() ? "草稿（待复验）" : "已转正";
+        }
 
         public int priority() {
             return SRC_USER.equals(source) ? 10 : 5;
@@ -72,13 +96,101 @@ public class SkillCardStore {
 
     private final File file;
     private final File guideFile;
+    private final File verFile;
     private final List<Card> cards = new ArrayList<>();
+    private final java.util.Map<String, List<VersionSnap>> versions =
+            new java.util.HashMap<>();
+
+    /**
+     * 版本快照（v3.58 生命周期步骤1）：修卡/回滚前压入历史。
+     * 与 Card 分离存 skill_card_versions.json（冷数据，不进主文件）。
+     */
+    public static class VersionSnap {
+        public int version;
+        public long savedAt;
+        public String name = "";
+        public String trigger = "";
+        public String content = "";
+        public String summary = "";
+        public String note = "";
+
+        JSONObject toJson() {
+            JSONObject o = new JSONObject();
+            try {
+                o.put("version", version);
+                o.put("savedAt", savedAt);
+                o.put("name", name);
+                o.put("trigger", trigger);
+                o.put("content", content);
+                o.put("summary", summary);
+                o.put("note", note);
+            } catch (Exception ignored) {
+            }
+            return o;
+        }
+
+        static VersionSnap fromJson(JSONObject o) {
+            VersionSnap sn = new VersionSnap();
+            sn.version = o.optInt("version", 1);
+            sn.savedAt = o.optLong("savedAt", 0);
+            sn.name = o.optString("name", "");
+            sn.trigger = o.optString("trigger", "");
+            sn.content = o.optString("content", "");
+            sn.summary = o.optString("summary", "");
+            sn.note = o.optString("note", "");
+            return sn;
+        }
+    }
+
+    /**
+     * 纯函数：给卡片拍快照并压入历史，返回更新后的历史列表（JVM 可单测）。
+     * 超过 VERSION_HISTORY_CAP 时丢弃最老快照。
+     */
+    static List<VersionSnap> snapshotFor(List<VersionSnap> hist, Card c, String note) {
+        if (hist == null) hist = new ArrayList<>();
+        VersionSnap sn = new VersionSnap();
+        sn.version = c.version;
+        sn.savedAt = System.currentTimeMillis();
+        sn.name = c.name == null ? "" : c.name;
+        sn.trigger = c.trigger == null ? "" : c.trigger;
+        sn.content = c.content == null ? "" : c.content;
+        sn.summary = c.summary == null ? "" : c.summary;
+        sn.note = note == null ? "" : note;
+        hist.add(sn);
+        while (hist.size() > VERSION_HISTORY_CAP) hist.remove(0);
+        return hist;
+    }
+
+    /**
+     * 纯函数：调卡结局状态机（JVM 可单测）。
+     * success 且为草稿 → 转正（复验成功一次即转正），返回 "promoted"；
+     * 失败 → 打回草稿并记修卡原因（就地修卡标记），返回 "needs_repair"；
+     * success 且已转正 → 仅计数，返回 "ok"。
+     */
+    static String recordUseOutcome(Card c, boolean success, String failNote) {
+        if (c == null) return "missing";
+        c.useCount++;
+        if (success) {
+            if (STATUS_DRAFT.equals(c.status)) {
+                c.status = STATUS_OFFICIAL;
+                c.verifyCount++;
+                c.repairNote = "";
+                return "promoted";
+            }
+            return "ok";
+        }
+        c.status = STATUS_DRAFT;
+        c.repairNote = failNote == null ? "" : failNote;
+        return "needs_repair";
+    }
 
     public SkillCardStore(Context ctx) {
         File dir = ctx.getApplicationContext().getFilesDir();
         file = new File(dir, "skill_cards.json");
         guideFile = new File(dir, "skill_cards_guide.json");
+        verFile = new File(dir, "skill_card_versions.json");
         load();
+        loadVersions();
     }
 
     public synchronized String add(String name, String type, String source,
@@ -96,6 +208,110 @@ public class SkillCardStore {
         cards.add(0, c);
         save();
         return c.id;
+    }
+
+    /**
+     * 技能卡生命周期（v3.58 步骤1）：成功轨迹自动沉淀为草稿卡。
+     * 草稿卡同样可被调卡（否则永无复验机会），调卡成功一次即转正；
+     * 用户手动创建的卡走 add()（source=user 默认已转正，用户亲定即信任）。
+     */
+    public synchronized String addDraft(String name, String type, String source,
+                                        String trigger, String content, String summary,
+                                        String appPkg) {
+        String id = add(name, type, source, trigger, content, summary);
+        Card c = get(id);
+        if (c != null) {
+            c.status = STATUS_DRAFT;
+            c.appPkg = appPkg == null ? "" : appPkg;
+            save();
+        }
+        return id;
+    }
+
+    /**
+     * 调卡结局落账：计数 + 草稿转正/失败打回草稿（v3.58 步骤1；use_card 接线在步骤3）。
+     * 返回 promoted（复验转正）/ needs_repair（打回待修卡）/ ok / missing。
+     */
+    public synchronized String recordUse(String id, boolean success, String failNote) {
+        Card c = get(id);
+        String r = recordUseOutcome(c, success, failNote);
+        if (c != null) save();
+        return r;
+    }
+
+    /** 草稿转正（手动/管理入口；自动转正在 recordUse 里）。 */
+    public synchronized boolean promote(String id) {
+        Card c = get(id);
+        if (c == null) return false;
+        c.status = STATUS_OFFICIAL;
+        c.verifyCount++;
+        c.repairNote = "";
+        save();
+        return true;
+    }
+
+    /**
+     * 就地修卡：快照旧版本 → 更新内容 → version++ → 打回草稿待复验
+     *（SPEC：修卡同样走草稿→复验→转正）。
+     */
+    public synchronized boolean repair(String id, String name, String trigger,
+                                       String content, String summary, String note) {
+        Card c = get(id);
+        if (c == null) return false;
+        List<VersionSnap> hist = versionsFor(id);
+        snapshotFor(hist, c, note == null ? "" : ("修卡前快照：" + note));
+        if (name != null) c.name = name;
+        if (trigger != null) c.trigger = trigger;
+        if (content != null) c.content = content;
+        if (summary != null) c.summary = summary;
+        c.version++;
+        c.status = STATUS_DRAFT;
+        c.repairNote = note == null ? "" : note;
+        c.updatedAt = System.currentTimeMillis();
+        save();
+        saveVersions();
+        return true;
+    }
+
+    /**
+     * 回滚到某版本：快照当前 → 恢复目标版本内容 → version++（单调）
+     * → 打回草稿待复验。目标版本不存在返回 false。
+     */
+    public synchronized boolean rollback(String id, int version) {
+        Card c = get(id);
+        if (c == null) return false;
+        List<VersionSnap> hist = versionsFor(id);
+        VersionSnap target = null;
+        for (VersionSnap sn : hist) {
+            if (sn.version == version) target = sn;
+        }
+        if (target == null) return false;
+        snapshotFor(hist, c, "回滚前快照（目标 v" + version + "）");
+        c.name = target.name;
+        c.trigger = target.trigger;
+        c.content = target.content;
+        c.summary = target.summary;
+        c.version++;
+        c.status = STATUS_DRAFT;
+        c.repairNote = "回滚到 v" + version + "，待复验";
+        c.updatedAt = System.currentTimeMillis();
+        save();
+        saveVersions();
+        return true;
+    }
+
+    /** 版本历史（只读拷贝）。 */
+    public synchronized List<VersionSnap> versions(String id) {
+        return new ArrayList<>(versionsFor(id));
+    }
+
+    private List<VersionSnap> versionsFor(String id) {
+        List<VersionSnap> h = versions.get(id);
+        if (h == null) {
+            h = new ArrayList<>();
+            versions.put(id, h);
+        }
+        return h;
     }
 
     /** 按优先级排序：用户在前，自主在后；同级按使用次数 */
@@ -277,6 +493,7 @@ public class SkillCardStore {
                     .append(c.sourceLabel());
             if (SRC_USER.equals(c.source)) sb.append("·优先");
             if (c.useCount > 0) sb.append("·已用").append(c.useCount).append("次");
+            if (STATUS_DRAFT.equals(c.status)) sb.append("·草稿（待复验，调卡成功后转正）");
             sb.append("）触发：").append(c.trigger)
                     .append(" —— ").append(c.summary).append("\n");
         }
@@ -360,11 +577,56 @@ public class SkillCardStore {
                 o.put("summary", c.summary);
                 o.put("useCount", c.useCount);
                 o.put("updatedAt", c.updatedAt);
+                o.put("status", c.status);
+                o.put("version", c.version);
+                o.put("verifyCount", c.verifyCount);
+                o.put("repairNote", c.repairNote);
+                o.put("appPkg", c.appPkg);
                 arr.put(o);
             }
             JSONObject root = new JSONObject();
             root.put("cards", arr);
             Files.write(f.toPath(), root.toString().getBytes(StandardCharsets.UTF_8));
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** 版本历史落盘（冷数据独立文件） */
+    private void saveVersions() {
+        try {
+            JSONObject root = new JSONObject();
+            JSONObject vs = new JSONObject();
+            for (java.util.Map.Entry<String, List<VersionSnap>> e
+                    : versions.entrySet()) {
+                JSONArray arr = new JSONArray();
+                for (VersionSnap sn : e.getValue()) arr.put(sn.toJson());
+                vs.put(e.getKey(), arr);
+            }
+            root.put("versions", vs);
+            Files.write(verFile.toPath(),
+                    root.toString().getBytes(StandardCharsets.UTF_8));
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void loadVersions() {
+        try {
+            if (!verFile.exists()) return;
+            String txt = new String(Files.readAllBytes(verFile.toPath()),
+                    StandardCharsets.UTF_8);
+            JSONObject vs = new JSONObject(txt).optJSONObject("versions");
+            if (vs == null) return;
+            java.util.Iterator<String> keys = vs.keys();
+            while (keys.hasNext()) {
+                String id = keys.next();
+                JSONArray arr = vs.optJSONArray(id);
+                if (arr == null) continue;
+                List<VersionSnap> h = new ArrayList<>();
+                for (int i = 0; i < arr.length(); i++) {
+                    h.add(VersionSnap.fromJson(arr.getJSONObject(i)));
+                }
+                versions.put(id, h);
+            }
         } catch (Exception ignored) {
         }
     }
@@ -400,6 +662,11 @@ public class SkillCardStore {
                 c.summary = o.optString("summary", "");
                 c.useCount = o.optInt("useCount", 0);
                 c.updatedAt = o.optLong("updatedAt", 0);
+                c.status = o.optString("status", STATUS_OFFICIAL);
+                c.version = o.optInt("version", 1);
+                c.verifyCount = o.optInt("verifyCount", 0);
+                c.repairNote = o.optString("repairNote", "");
+                c.appPkg = o.optString("appPkg", "");
                 if (c.isProse() != guide) misplaced = true;
                 if (get(c.id) != null) continue; // 同 id 已加载（去重）
                 cards.add(c);

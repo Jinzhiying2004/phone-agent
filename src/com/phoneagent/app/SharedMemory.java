@@ -179,6 +179,82 @@ store.save(ctx.getFilesDir());
 }
 }
 
+/**
+* v3.58 步骤2：Distiller 技能卡草稿队列消费 -> 成功轨迹自动沉淀为草稿卡。
+* 调用点：AgentLoop.run() 任务成功结局后（distill 已有调用点 addExperience 之后）。
+* 规则（设计稿 v358-design.md 3.2；SPEC 第三节技能卡自维护）：
+* - 只沉淀成功轨迹（ok=false 直接返回 null）；
+* - 候选 votes>=2 才沉淀（重复出现，防单次偶然成功污染好卡）；
+* - 沉淀为草稿卡（status=draft），同类任务下次调卡成功一次才转正；
+* - 已有同类卡（卡名 bigram Jaccard>=0.6）时跳过，防重复沉淀；
+* - content=本轮步骤轨迹（上限 4000 字），summary=结局摘要+复现次数，
+*   appPkg=本轮主前台包名（界面地图联动锚点，步骤3 用）。
+* 三端横扫：SkillCardStore 是共享层（files/ 目录三端共用），草稿卡三端可见；
+* AgentLoop/TgBot/远控的任务结局都走本方法（AgentLoop.run 统一调用点）。
+* @return 新草稿卡 id；无沉淀返回 null
+*/
+public static synchronized String maybeDraftSkillCard(Context ctx, String goal,
+boolean ok, String steps, String mainPkg, String note) {
+try {
+if (ctx == null || !ok) return null;
+String g = goal == null ? "" : goal.trim();
+if (g.isEmpty()) return null;
+File dir = ctx.getFilesDir();
+JSONObject cand = Distiller.consumeDraftCandidate(dir, g);
+if (cand == null) return null;
+int votes = cand.optInt("votes", 2);
+SkillCardStore store = new SkillCardStore(ctx);
+if (hasSimilarCard(store.listByPriority(), g)) return null;
+String name = g.length() > 40 ? g.substring(0, 40) + "…" : g;
+java.util.List<String> kws =
+new java.util.ArrayList<>(SkillCardStore.keywords(g));
+java.util.Collections.sort(kws);
+String trigger = joinWith(kws, " ");
+String content = steps == null ? "" : steps;
+if (content.length() > CARD_STEPS_CAP) {
+content = content.substring(0, CARD_STEPS_CAP) + "…";
+}
+String summary = note == null ? "" : note.trim();
+if (summary.length() > 120) summary = summary.substring(0, 120) + "…";
+if (!summary.isEmpty()) summary += "；";
+summary += "同类任务重复出现 " + votes
++ " 次，成功轨迹自动沉淀为草稿卡（待同类复验成功后转正）";
+String pkg = mainPkg == null ? "" : mainPkg.trim();
+return store.addDraft(name, SkillCardStore.TYPE_SKILL,
+SkillCardStore.SRC_AGENT, trigger, content, summary, pkg);
+} catch (Exception e) {
+return null;
+}
+}
+
+/** 草稿卡 content（步骤轨迹）上限：防单次超长轨迹膨胀主文件 */
+private static final int CARD_STEPS_CAP = 4000;
+
+private static String joinWith(java.util.List<String> list, String sep) {
+StringBuilder sb = new StringBuilder();
+for (String s : list) {
+if (s == null || s.isEmpty()) continue;
+if (sb.length() > 0) sb.append(sep);
+sb.append(s);
+}
+return sb.toString();
+}
+
+/**
+* 已有同类卡判定（防重复沉淀）：卡名与目标 bigram Jaccard>=0.6
+* 视为同类（与 Distiller.addOrVote 同口径）。纯函数，可独立测试。
+*/
+static boolean hasSimilarCard(List<SkillCardStore.Card> cards, String goal) {
+if (cards == null || goal == null) return false;
+Set<String> mine = bigrams(goal);
+if (mine.isEmpty()) return false;
+for (SkillCardStore.Card c : cards) {
+if (c == null || c.name == null) continue;
+if (jaccard(mine, bigrams(c.name)) >= 0.6) return true;
+}
+return false;
+}
+
 /** 按目标相似度找最相关的认知注入；无返回空串。
 * 记忆分层步骤3：experience.json 停做注入源（只保留为蒸馏原料队列，
 * 见 addExperience），相关认知改走长期认知库 CognitionStore.relevant：
@@ -280,6 +356,14 @@ return out;
 }
 for (int i = 0; i + 2 <= t.length(); i++) out.add(t.substring(i, i + 2));
 return out;
+}
+
+private static double jaccard(Set<String> a, Set<String> b) {
+if (a.isEmpty() || b.isEmpty()) return 0.0;
+int inter = 0;
+for (String s : a) if (b.contains(s)) inter++;
+int union = a.size() + b.size() - inter;
+return union == 0 ? 0.0 : (double) inter / union;
 }
 
 private static String trim(String s, int max) {

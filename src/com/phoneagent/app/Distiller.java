@@ -23,8 +23,10 @@ import java.util.Set;
  * - 蒸馏不出（成败都平淡、无病因）直接丢弃，不留条目；
  * - 候选进 cognition.json，status=draft；同类候选再出现 votes+1，
  *   votes>=2 自动转正（走 CognitionStore.vote）。
- * - 重复出现的目标 -> 技能卡草稿候选，落 distill_card_queue.jsonl，
- *   供 v3.53 技能卡生命周期消费。
+ * - 重复出现的目标 -> 技能卡草稿候选，落 distill_card_queue.jsonl；
+ * - v3.58 步骤2：消费方落地（SharedMemory.maybeDraftSkillCard，经
+ *   AgentLoop 任务成功结局后调用）：votes>=2 的候选 -> 草稿卡，消费后
+ *   从队列移除；超 30 天未复现的 stale 条目顺带清理。
  */
 public class Distiller {
 
@@ -132,39 +134,104 @@ public class Distiller {
         return !store.put(kind, text, src, "").isEmpty();
     }
 
+    /**
+     * 技能卡草稿队列消费（v3.58 步骤2）：取与 goal 同类（bigram>=0.5）
+     * 且 votes>=2 的候选，成功取出后从队列移除（调用方负责沉淀为草稿卡）；
+     * 顺带清理超 30 天未复现的 stale 条目（队列是工作缓冲，不是长期存储）。
+     * 只在任务成功结局后由调用方触发（失败轨迹不沉淀为技能卡）。
+     *
+     * @return 被消费的候选（含 goal/votes/ts/src）；无符合候选返回 null
+     */
+    public static JSONObject consumeDraftCandidate(File dir, String goal) {
+        try {
+            if (dir == null || goal == null) return null;
+            File f = new File(dir, CARD_QUEUE_FILE);
+            if (!f.exists() || f.length() <= 0) return null;
+            List<JSONObject> lines = readQueue(f);
+            long now = System.currentTimeMillis();
+            Set<String> mine = bigrams(goal.trim());
+            JSONObject picked = null;
+            List<JSONObject> keep = new ArrayList<>();
+            for (JSONObject o : lines) {
+                if (picked == null
+                        && o.optInt("votes", 1) >= 2
+                        && jaccard(mine,
+                                bigrams(o.optString("goal", ""))) >= 0.5) {
+                    picked = o; // 消费：不写回
+                    continue;
+                }
+                if (now - o.optLong("ts", now) > QUEUE_STALE_MS) continue; // stale 清理
+                keep.add(o);
+            }
+            if (picked != null || keep.size() != lines.size()) {
+                writeQueue(f, keep);
+            }
+            return picked;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    /** 队列条目超期：30 天未复现视为不再重复，清理 */
+    private static final long QUEUE_STALE_MS = 30L * 24 * 3600 * 1000;
+
+    /** 读整条队列（坏行跳过，与旧 appendCardDraft 口径一致） */
+    private static List<JSONObject> readQueue(File f) {
+        List<JSONObject> lines = new ArrayList<>();
+        try {
+            FileInputStream in = new FileInputStream(f);
+            byte[] buf = new byte[(int) f.length()];
+            int off = 0, r;
+            while (off < buf.length
+                    && (r = in.read(buf, off, buf.length - off)) > 0) {
+                off += r;
+            }
+            in.close();
+            String[] raw = new String(buf, 0, off, "UTF-8").split("\n");
+            for (String ln : raw) {
+                ln = ln.trim();
+                if (ln.isEmpty()) continue;
+                try {
+                    lines.add(new JSONObject(ln));
+                } catch (Exception ignored) {
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return lines;
+    }
+
+    /** 全量写回队列 */
+    private static void writeQueue(File f, List<JSONObject> lines) {
+        try {
+            StringBuilder sb = new StringBuilder();
+            for (JSONObject o : lines) {
+                sb.append(o.toString()).append("\n");
+            }
+            FileOutputStream out = new FileOutputStream(f);
+            out.write(sb.toString().getBytes("UTF-8"));
+            out.close();
+        } catch (Exception ignored) {
+        }
+    }
+
     /** 技能卡草稿队列：同类目标再出现 votes+1，否则追加一行 */
     private static void appendCardDraft(File dir, String goal) {
         try {
             if (dir == null) return;
             if (!dir.exists()) dir.mkdirs();
             File f = new File(dir, CARD_QUEUE_FILE);
-            List<JSONObject> lines = new ArrayList<>();
+            List<JSONObject> lines =
+                    (f.exists() && f.length() > 0) ? readQueue(f)
+                            : new ArrayList<JSONObject>();
             boolean hit = false;
-            if (f.exists() && f.length() > 0) {
-                FileInputStream in = new FileInputStream(f);
-                byte[] buf = new byte[(int) f.length()];
-                int off = 0, r;
-                while (off < buf.length
-                        && (r = in.read(buf, off, buf.length - off)) > 0) {
-                    off += r;
-                }
-                in.close();
-                String[] raw = new String(buf, 0, off, "UTF-8").split("\n");
-                Set<String> mine = bigrams(goal);
-                for (String ln : raw) {
-                    ln = ln.trim();
-                    if (ln.isEmpty()) continue;
-                    try {
-                        JSONObject o = new JSONObject(ln);
-                        if (!hit && jaccard(mine,
-                                bigrams(o.optString("goal", ""))) >= 0.5) {
-                            o.put("votes", o.optInt("votes", 1) + 1);
-                            o.put("ts", System.currentTimeMillis());
-                            hit = true;
-                        }
-                        lines.add(o);
-                    } catch (Exception ignored) {
-                    }
+            Set<String> mine = bigrams(goal);
+            for (JSONObject o : lines) {
+                if (!hit && jaccard(mine,
+                        bigrams(o.optString("goal", ""))) >= 0.5) {
+                    o.put("votes", o.optInt("votes", 1) + 1);
+                    o.put("ts", System.currentTimeMillis());
+                    hit = true;
                 }
             }
             if (!hit) {
@@ -175,13 +242,7 @@ public class Distiller {
                 o.put("src", CognitionStore.SRC_TASK_DISTILL);
                 lines.add(o);
             }
-            StringBuilder sb = new StringBuilder();
-            for (JSONObject o : lines) {
-                sb.append(o.toString()).append("\n");
-            }
-            FileOutputStream out = new FileOutputStream(f);
-            out.write(sb.toString().getBytes("UTF-8"));
-            out.close();
+            writeQueue(f, lines);
         } catch (Exception ignored) {
         }
     }
